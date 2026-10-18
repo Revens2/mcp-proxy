@@ -2545,9 +2545,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.16"
+version = "0.11.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
+checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -3019,9 +3019,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
@@ -3549,7 +3549,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3857,9 +3857,8 @@ checksum = "121c2a6cda46980bb0fcd1647ffaf6cd3fc79a013de288782836f6df9c48780e"
 
 [[package]]
 name = "tower-mcp"
-version = "0.23.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c854d71758ccdbde224ea9b8408026bcef94833e91f497be3c31cedc60b25ee3"
+version = "0.24.0"
+source = "git+https://github.com/joshrotenberg/tower-mcp?rev=1eb3e4ec5f004dfb884004b2be2b083fafdbe88c#1eb3e4ec5f004dfb884004b2be2b083fafdbe88c"
 dependencies = [
  "async-trait",
  "axum",
@@ -3871,6 +3870,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "jsonwebtoken",
+ "libc",
  "pin-project-lite",
  "regex",
  "reqwest 0.13.5",
@@ -3893,9 +3893,8 @@ dependencies = [
 
 [[package]]
 name = "tower-mcp-types"
-version = "0.23.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a4b52e6634aa34d351382cac08b8cfd0355c01e386faaf8a790a69e8f7de59a"
+version = "0.24.0"
+source = "git+https://github.com/joshrotenberg/tower-mcp?rev=1eb3e4ec5f004dfb884004b2be2b083fafdbe88c#1eb3e4ec5f004dfb884004b2be2b083fafdbe88c"
 dependencies = [
  "base64 0.23.0",
  "indexmap",
