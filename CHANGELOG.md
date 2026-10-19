@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-10-19
+
+### Bug Fixes
+
+- Redact credentials from configuration diagnostics ([#308](https://github.com/joshrotenberg/mcp-proxy/pull/308))
+- Require explicit management authority across HTTP and MCP ([#310](https://github.com/joshrotenberg/mcp-proxy/pull/310))
+- Enforce target policies for search-mode invocations ([#311](https://github.com/joshrotenberg/mcp-proxy/pull/311))
+- Reject unresolved and invalid runtime secrets ([#312](https://github.com/joshrotenberg/mcp-proxy/pull/312))
+- Align OAuth validation with public resource identity ([#313](https://github.com/joshrotenberg/mcp-proxy/pull/313))
+- Validate RBAC mappings and combine roles deterministically ([#315](https://github.com/joshrotenberg/mcp-proxy/pull/315))
+- Own reload watchers and keep backend drivers progressing ([#316](https://github.com/joshrotenberg/mcp-proxy/pull/316))
+- Enforce the supported live-reload policy contract ([#317](https://github.com/joshrotenberg/mcp-proxy/pull/317))
+- Bound request coalescing and clean up cancelled leaders ([#318](https://github.com/joshrotenberg/mcp-proxy/pull/318))
+- Emit enabled CLI request logs without private error bodies ([#319](https://github.com/joshrotenberg/mcp-proxy/pull/319))
+- Classify MCP outcomes consistently across middleware ([#320](https://github.com/joshrotenberg/mcp-proxy/pull/320))
+- Bound shutdown and own proxy runtime resources ([#321](https://github.com/joshrotenberg/mcp-proxy/pull/321))
+
+### Testing
+
+- Verify configured application MCP sessions end to end ([#322](https://github.com/joshrotenberg/mcp-proxy/pull/322))
+
+
+
 ## [0.6.0] - 2026-10-03
 
 ### Migration
