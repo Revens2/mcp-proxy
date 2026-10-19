@@ -516,6 +516,7 @@ fn default_backend() -> BackendConfig {
         hide_prompts: Vec::new(),
         hide_destructive: false,
         read_only_only: false,
+        read_only_targets: Vec::new(),
         failover_for: None,
         priority: 0,
         canary_of: None,

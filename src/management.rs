@@ -132,8 +132,12 @@ pub(crate) fn authenticate(
 }
 
 fn management_tool(prefix: &str, name: &str) -> bool {
-    name.strip_prefix(prefix)
-        .is_some_and(|local| !matches!(local, "search_tools" | "get_tool" | "call_tool"))
+    name.strip_prefix(prefix).is_some_and(|local| {
+        !matches!(
+            local,
+            "search_tools" | "get_tool" | "call_tool" | "backend_status"
+        )
+    })
 }
 
 fn management_request(prefix: &str, request: &McpRequest) -> bool {

@@ -482,6 +482,14 @@ pub struct BackendConfig {
     /// Only expose tools annotated as read-only (`read_only_hint = true`).
     #[serde(default)]
     pub read_only_only: bool,
+    /// Explicit backend-local tool names that are the only tools exposed and
+    /// callable through this backend. The allowlist is authoritative: tool
+    /// annotations are not consulted, so an omitted or false `read_only_hint`
+    /// cannot widen access. Calls to any unlisted tool are rejected, including
+    /// calls routed through `proxy/call_tool`. Cannot be combined with
+    /// `expose_tools`, `hide_tools`, `hide_destructive`, or `read_only_only`.
+    #[serde(default)]
+    pub read_only_targets: Vec<String>,
     /// Failover: name of the primary backend this is a failover for.
     /// When set, this backend's tools are hidden and requests are only
     /// routed here when the primary returns an error.
@@ -951,6 +959,21 @@ pub struct SecurityConfig {
     /// Must be a nonempty ASCII token without whitespace, distinct from data tokens.
     /// Required for JWT/OAuth configuration. Supports `${ENV_VAR}` syntax.
     pub admin_token: Option<String>,
+    /// Reject a configuration that binds outside loopback without inbound
+    /// authentication. Disabled by default for backwards compatibility; enable
+    /// it for any gateway that can be reached from another host.
+    #[serde(default)]
+    pub require_auth_outside_loopback: bool,
+    /// Fail-closed gateway mode. Every backend must declare an exact
+    /// `read_only_targets` allowlist; tools, resources, and prompts that do
+    /// not belong to a configured allowlist (including backends added later
+    /// at runtime) are hidden from listings and search and rejected on call;
+    /// completion and resource subscriptions are rejected. Routing features
+    /// that rewrite or fan out calls (failover, canary, mirror, composite
+    /// tools) are refused, and backend names must be client-safe identifiers
+    /// that cannot collide once namespaced.
+    #[serde(default)]
+    pub default_deny: bool,
 }
 
 /// Logging, metrics, and distributed tracing configuration.
@@ -1023,6 +1046,38 @@ fn default_separator() -> String {
 
 fn default_host() -> String {
     "127.0.0.1".to_string()
+}
+
+/// Whether a policy entry names exactly one item (no pattern syntax).
+fn is_exact_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with("re:")
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "*?[]{}!".contains(c))
+}
+
+/// Whether a name fits the tool-name grammar accepted by MCP clients such as
+/// ChatGPT: `^[A-Za-z0-9_-]{1,64}$`.
+fn is_client_safe_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Whether a configured listen host is restricted to the local machine.
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    unbracketed
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
 }
 
 fn default_port() -> u16 {
@@ -1259,6 +1314,49 @@ impl NameFilter {
 }
 
 impl BackendConfig {
+    /// Validate the exact-name policy of a backend using `read_only_targets`.
+    ///
+    /// The allowlist is the only policy for the backend, so it cannot be mixed
+    /// with deny lists or annotation filters, and every entry (including
+    /// `expose_resources` / `expose_prompts`) must be an exact name: glob
+    /// metacharacters and `re:` patterns would silently widen access.
+    fn check_read_only_targets(&self) -> Result<()> {
+        for (field, configured) in [
+            ("expose_tools", !self.expose_tools.is_empty()),
+            ("hide_tools", !self.hide_tools.is_empty()),
+            ("hide_resources", !self.hide_resources.is_empty()),
+            ("hide_prompts", !self.hide_prompts.is_empty()),
+            ("hide_destructive", self.hide_destructive),
+            ("read_only_only", self.read_only_only),
+        ] {
+            if configured {
+                anyhow::bail!(
+                    "backend '{}': read_only_targets cannot be combined with {}",
+                    self.name,
+                    field
+                );
+            }
+        }
+        for (field, names) in [
+            ("read_only_targets", &self.read_only_targets),
+            ("expose_resources", &self.expose_resources),
+            ("expose_prompts", &self.expose_prompts),
+        ] {
+            for name in names {
+                if !is_exact_name(name) {
+                    anyhow::bail!(
+                        "backend '{}': {} entry {:?} must be an exact name \
+                         (no whitespace, glob metacharacters, or re: patterns)",
+                        self.name,
+                        field,
+                        name
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Build a [`BackendFilter`] from this backend's expose/hide lists.
     /// Returns `None` if no filtering is configured.
     ///
@@ -1274,6 +1372,20 @@ impl BackendConfig {
                 tool_filter: NameFilter::allow_list(std::iter::empty::<String>())?,
                 resource_filter: NameFilter::allow_list(std::iter::empty::<String>())?,
                 prompt_filter: NameFilter::allow_list(std::iter::empty::<String>())?,
+                hide_destructive: false,
+                read_only_only: false,
+            }));
+        }
+
+        if !self.read_only_targets.is_empty() {
+            self.check_read_only_targets()?;
+            // The allowlist is the whole capability surface of the backend:
+            // resources and prompts are denied unless they are listed exactly.
+            return Ok(Some(BackendFilter {
+                namespace: format!("{}{}", self.name, separator),
+                tool_filter: NameFilter::allow_list(self.read_only_targets.iter().cloned())?,
+                resource_filter: NameFilter::allow_list(self.expose_resources.iter().cloned())?,
+                prompt_filter: NameFilter::allow_list(self.expose_prompts.iter().cloned())?,
                 hide_destructive: false,
                 read_only_only: false,
             }));
@@ -1593,6 +1705,62 @@ impl ProxyConfig {
         Ok(config)
     }
 
+    /// Structural checks for `security.default_deny`.
+    fn validate_default_deny(&self) -> Result<()> {
+        let separator = &self.proxy.separator;
+        let meta_tool = format!("proxy{separator}search_tools");
+        if separator.is_empty() || !is_client_safe_name(&meta_tool) {
+            anyhow::bail!(
+                "security.default_deny requires a separator made of [A-Za-z0-9_-] (for example \"_\")"
+            );
+        }
+        if self.auth.is_none() {
+            anyhow::bail!("security.default_deny requires inbound authentication ([auth])");
+        }
+        if !self.composite_tools.is_empty() {
+            anyhow::bail!("security.default_deny does not support composite_tools");
+        }
+        for backend in &self.backends {
+            let name = &backend.name;
+            if !is_client_safe_name(name) || name.contains(separator.as_str()) {
+                anyhow::bail!(
+                    "backend '{name}': security.default_deny requires a name made of \
+                     [A-Za-z0-9_-] that does not contain the separator {separator:?}"
+                );
+            }
+            if name == "proxy" {
+                anyhow::bail!("backend name 'proxy' is reserved for the gateway meta-tools");
+            }
+            for (field, configured) in [
+                ("failover_for", backend.failover_for.is_some()),
+                ("canary_of", backend.canary_of.is_some()),
+                ("mirror_of", backend.mirror_of.is_some()),
+            ] {
+                if configured {
+                    anyhow::bail!(
+                        "backend '{name}': security.default_deny does not support {field}"
+                    );
+                }
+            }
+            if backend.read_only_targets.is_empty() {
+                anyhow::bail!(
+                    "backend '{name}': security.default_deny requires an explicit read_only_targets allowlist"
+                );
+            }
+            // Report pattern syntax before the client-name grammar below.
+            backend.check_read_only_targets()?;
+            for target in &backend.read_only_targets {
+                let public = format!("{name}{separator}{target}");
+                if !is_client_safe_name(&public) {
+                    anyhow::bail!(
+                        "backend '{name}': tool {public:?} must match ^[A-Za-z0-9_-]{{1,64}}$"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         self.performance.coalesce.validate()?;
         if let Some(
@@ -1718,14 +1886,27 @@ impl ProxyConfig {
         }
 
         // Preserve the explicit management-credential requirement for JWT/OAuth.
+        // A default_deny gateway may instead run with management disabled, so
+        // no static credential is accepted on its public endpoint.
         if matches!(
             &self.auth,
             Some(AuthConfig::Jwt { .. }) | Some(AuthConfig::OAuth { .. })
         ) && self.security.admin_token.is_none()
+            && !self.security.default_deny
         {
             anyhow::bail!(
                 "security.admin_token is required when auth.type is 'jwt' or 'oauth': \
                  set a dedicated management credential (supports ${{ENV_VAR}})."
+            );
+        }
+
+        if self.security.require_auth_outside_loopback
+            && self.auth.is_none()
+            && !is_loopback_host(&self.proxy.listen.host)
+        {
+            anyhow::bail!(
+                "inbound authentication is required when proxy.listen.host is not loopback \
+                 (security.require_auth_outside_loopback = true)"
             );
         }
 
@@ -1737,7 +1918,14 @@ impl ProxyConfig {
             }
         }
 
+        if self.security.default_deny {
+            self.validate_default_deny()?;
+        }
+
         for backend in &self.backends {
+            if !backend.read_only_targets.is_empty() {
+                backend.check_read_only_targets()?;
+            }
             if !backend.headers.is_empty() && matches!(backend.transport, TransportType::Stdio) {
                 anyhow::bail!(
                     "backend '{}': headers require HTTP or WebSocket transport",
@@ -4506,5 +4694,198 @@ backends:
         assert_eq!(config.backends[0].priority, 0);
         assert_eq!(config.backends[1].priority, 10);
         assert_eq!(config.backends[2].priority, 5);
+    }
+
+    #[test]
+    fn require_auth_outside_loopback_is_enforced_only_when_opted_in() {
+        let public = r#"
+        [proxy]
+        name = "hub"
+        [proxy.listen]
+        host = "0.0.0.0"
+        [security]
+        require_auth_outside_loopback = true
+        [[backends]]
+        name = "api"
+        transport = "http"
+        url = "http://127.0.0.1:9/mcp"
+        "#;
+        let error = ProxyConfig::parse(public).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("inbound authentication is required"),
+            "{error}"
+        );
+
+        let authenticated = public.replace(
+            "[[backends]]",
+            "[auth]\ntype = \"bearer\"\ntokens = [\"${{MCP_HUB_STAGING_TOKEN}}\"]\n\n[[backends]]",
+        );
+        let config = ProxyConfig::parse(&authenticated).unwrap();
+        assert!(config.auth.is_some());
+
+        for host in ["127.0.0.1", "localhost", "::1", "[::1]"] {
+            let loopback = public.replace("0.0.0.0", host);
+            let config = ProxyConfig::parse(&loopback).unwrap();
+            assert!(config.auth.is_none());
+        }
+
+        let legacy = public.replace("require_auth_outside_loopback = true", "");
+        assert!(ProxyConfig::parse(&legacy).is_ok());
+    }
+
+    #[test]
+    fn read_only_targets_build_a_fail_closed_allowlist() {
+        let toml = r#"
+        [proxy]
+        name = "hub"
+        separator = "_"
+        [proxy.listen]
+        [[backends]]
+        name = "api"
+        transport = "http"
+        url = "http://127.0.0.1:9/mcp"
+        read_only_targets = ["read_note", "list_notes"]
+        "#;
+        let config = ProxyConfig::parse(toml).unwrap();
+        assert_eq!(config.proxy.separator, "_");
+        let filter = config.backends[0]
+            .build_filter(&config.proxy.separator)
+            .unwrap()
+            .unwrap();
+        assert_eq!(filter.namespace, "api_");
+        assert!(!filter.read_only_only);
+        assert!(filter.tool_filter.allows("read_note"));
+        assert!(filter.tool_filter.allows("list_notes"));
+        assert!(!filter.tool_filter.allows("write_note"));
+        assert!(!filter.tool_filter.allows("read_note "));
+    }
+
+    #[test]
+    fn read_only_targets_reject_annotation_and_name_filter_combinations() {
+        for extra in [
+            "read_only_only = true",
+            "hide_destructive = true",
+            "expose_tools = [\"read_note\"]",
+            "hide_tools = [\"write_note\"]",
+        ] {
+            let toml = format!(
+                r#"
+                [proxy]
+                name = "hub"
+                [proxy.listen]
+                [[backends]]
+                name = "api"
+                transport = "http"
+                url = "http://127.0.0.1:9/mcp"
+                read_only_targets = ["read_note"]
+                {extra}
+                "#
+            );
+            let error = ProxyConfig::parse(&toml).unwrap_err();
+            assert!(
+                error.to_string().contains("cannot be combined"),
+                "{extra}: {error}"
+            );
+        }
+    }
+
+    const HUB: &str = r#"
+        [proxy]
+        name = "hub"
+        separator = "_"
+        tool_exposure = "search"
+        [proxy.listen]
+        [security]
+        default_deny = true
+        [auth]
+        type = "bearer"
+        tokens = ["data-token"]
+        [[backends]]
+        name = "vault-ro"
+        transport = "http"
+        url = "http://127.0.0.1:9/mcp"
+        read_only_targets = ["read_note", "search_vault"]
+        "#;
+
+    #[test]
+    fn default_deny_accepts_an_exact_allowlisted_hub() {
+        let config = ProxyConfig::parse(HUB).unwrap();
+        assert!(config.security.default_deny);
+        let filter = config.backends[0]
+            .build_filter(&config.proxy.separator)
+            .unwrap()
+            .unwrap();
+        // Resources and prompts are closed unless listed exactly.
+        assert!(!filter.resource_filter.allows("note://1"));
+        assert!(!filter.prompt_filter.allows("summary"));
+        assert!(filter.tool_filter.allows("search_vault"));
+    }
+
+    #[test]
+    fn default_deny_rejects_unsafe_hub_shapes() {
+        let cases: [(&str, String); 10] = [
+            (
+                "explicit read_only_targets",
+                HUB.replace("read_only_targets = [\"read_note\", \"search_vault\"]", ""),
+            ),
+            (
+                "inbound authentication",
+                HUB.replace(
+                    "[auth]\n        type = \"bearer\"\n        tokens = [\"data-token\"]",
+                    "",
+                ),
+            ),
+            (
+                "separator",
+                HUB.replace("separator = \"_\"", "separator = \"/\""),
+            ),
+            ("contain the separator", HUB.replace("vault-ro", "vault_ro")),
+            ("reserved", HUB.replace("vault-ro", "proxy")),
+            ("A-Za-z0-9_-", HUB.replace("vault-ro", "vault.ro")),
+            ("failover_for", format!("{HUB}failover_for = \"other\"\n")),
+            ("mirror_of", format!("{HUB}mirror_of = \"other\"\n")),
+            (
+                "1,64",
+                HUB.replace("\"search_vault\"", &format!("\"{}\"", "x".repeat(60))),
+            ),
+            (
+                "composite_tools",
+                format!(
+                    "{HUB}\n[[composite_tools]]\nname = \"both\"\ndescription = \"d\"\ntools = [\"vault-ro_read_note\"]\n"
+                ),
+            ),
+        ];
+        for (expected, toml) in cases {
+            let error = ProxyConfig::parse(&toml).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(expected), "{expected}: {message}");
+        }
+    }
+
+    #[test]
+    fn read_only_targets_require_exact_names() {
+        for pattern in [
+            "read_*",
+            "read_?ote",
+            "re:^read_",
+            "read note",
+            "[rw]ead",
+            "",
+        ] {
+            let toml = HUB.replace("\"search_vault\"", &format!("{pattern:?}"));
+            let error = ProxyConfig::parse(&toml).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("must be an exact name"),
+                "{pattern:?}: {error:#}"
+            );
+        }
+        let toml = format!("{HUB}expose_resources = [\"note://*\"]\n");
+        assert!(ProxyConfig::parse(&toml).is_err());
+        let toml = format!("{HUB}hide_resources = [\"note://secret\"]\n");
+        assert!(
+            format!("{:#}", ProxyConfig::parse(&toml).unwrap_err()).contains("cannot be combined")
+        );
     }
 }

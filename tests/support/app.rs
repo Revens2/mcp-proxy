@@ -9,6 +9,8 @@ pub struct App {
     pub url: String,
     owner: Owner,
 }
+// Variant sizes differ by platform; one Owner exists per test application.
+#[allow(clippy::large_enum_variant)]
 enum Owner {
     Embedded {
         shutdown: mcp_proxy::ShutdownHandle,
@@ -134,8 +136,11 @@ impl App {
                     .await
                     .expect("CLI shutdown deadline")
                     .unwrap();
+                // A killed child has no portable success status off Unix.
                 #[cfg(unix)]
                 assert!(status.success(), "{status}");
+                #[cfg(not(unix))]
+                let _ = status;
                 tokio::time::timeout(Duration::from_secs(1), reader)
                     .await
                     .expect("stderr reader deadline")

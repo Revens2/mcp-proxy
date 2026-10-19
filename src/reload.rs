@@ -99,19 +99,25 @@ pub fn spawn_config_watcher_with_schemas(
         config_path,
         proxy,
         #[cfg(feature = "discovery")]
-        discovery_index,
+        discovery_index.map(|(index, schemas, separator)| (index, schemas, separator, None)),
         policy,
     )
 }
 
+/// Discovery state refreshed after each reload: index, schemas, separator,
+/// and the startup capability visibility the index must respect.
+#[cfg(feature = "discovery")]
+pub(crate) type ReloadDiscovery = (
+    crate::discovery::SharedDiscoveryIndex,
+    crate::discovery::SchemaStore,
+    String,
+    Option<crate::filter::ToolVisibility>,
+);
+
 pub(crate) fn spawn_config_watcher_with_policy(
     config_path: PathBuf,
     proxy: McpProxy,
-    #[cfg(feature = "discovery")] discovery_index: Option<(
-        crate::discovery::SharedDiscoveryIndex,
-        crate::discovery::SchemaStore,
-        String,
-    )>,
+    #[cfg(feature = "discovery")] discovery_index: Option<ReloadDiscovery>,
     policy: anyhow::Result<ReloadPolicy>,
 ) -> ConfigWatcher {
     let (cancel, cancelled) = tokio::sync::oneshot::channel();
@@ -158,11 +164,7 @@ pub(crate) fn spawn_config_watcher_with_policy(
 async fn watch_loop(
     config_path: PathBuf,
     proxy: McpProxy,
-    #[cfg(feature = "discovery")] discovery_index: Option<(
-        crate::discovery::SharedDiscoveryIndex,
-        crate::discovery::SchemaStore,
-        String,
-    )>,
+    #[cfg(feature = "discovery")] discovery_index: Option<ReloadDiscovery>,
     policy: ReloadPolicy,
     connections: crate::lifecycle::Connections,
 ) {
@@ -296,10 +298,16 @@ async fn watch_loop(
 
         // Re-index discovery if enabled
         #[cfg(feature = "discovery")]
-        if let Some((ref index, ref schemas, ref separator)) = discovery_index {
+        if let Some((ref index, ref schemas, ref separator, ref visibility)) = discovery_index {
             let mut proxy_clone = proxy.clone();
-            crate::discovery::reindex_with_schemas(index, schemas, &mut proxy_clone, separator)
-                .await;
+            crate::discovery::reindex_with_visibility(
+                index,
+                schemas,
+                &mut proxy_clone,
+                separator,
+                visibility.as_ref(),
+            )
+            .await;
         }
 
         policy.record(if failed { "failed" } else { "applied" }, !failed, false);

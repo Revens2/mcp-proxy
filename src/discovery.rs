@@ -94,25 +94,24 @@ pub async fn build_index_with_schemas(
     proxy: &mut McpProxy,
     separator: &str,
 ) -> (SharedDiscoveryIndex, SchemaStore) {
-    use tower::Service;
-    use tower_mcp::protocol::{ListToolsParams, McpRequest, McpResponse, RequestId};
-    use tower_mcp::router::{Extensions, RouterRequest};
+    build_index_with_visibility(proxy, separator, None).await
+}
 
-    let req = RouterRequest {
-        id: RequestId::Number(0),
-        inner: McpRequest::ListTools(ListToolsParams::default()),
-        extensions: Extensions::new(),
-    };
-
-    let tools = match proxy.call(req).await {
-        Ok(resp) => match resp.inner {
-            Ok(McpResponse::ListTools(result)) => result.tools,
-            _ => {
-                tracing::warn!("Failed to list tools for discovery indexing");
-                vec![]
-            }
-        },
-        Err(_) => vec![],
+/// Build a discovery index restricted to tools the capability filter allows.
+///
+/// The index is built from the raw proxy, below the capability filter, so
+/// without `visibility` it would reveal tools that every call rejects.
+pub async fn build_index_with_visibility(
+    proxy: &mut McpProxy,
+    separator: &str,
+    visibility: Option<&crate::filter::ToolVisibility>,
+) -> (SharedDiscoveryIndex, SchemaStore) {
+    let Some(tools) = list_visible_tools(proxy, visibility).await else {
+        tracing::warn!("Failed to list tools for discovery indexing");
+        return (
+            Arc::new(RwLock::new(DiscoveryRegistry::new())),
+            SchemaStore::new(),
+        );
     };
 
     let mut registry = DiscoveryRegistry::new();
@@ -130,6 +129,34 @@ pub async fn build_index_with_schemas(
     (Arc::new(RwLock::new(registry)), schemas)
 }
 
+/// List the proxy's tools, keeping only those `visibility` allows.
+async fn list_visible_tools(
+    proxy: &mut McpProxy,
+    visibility: Option<&crate::filter::ToolVisibility>,
+) -> Option<Vec<ToolDefinition>> {
+    use tower::Service;
+    use tower_mcp::protocol::{ListToolsParams, McpRequest, McpResponse, RequestId};
+    use tower_mcp::router::{Extensions, RouterRequest};
+
+    let req = RouterRequest {
+        id: RequestId::Number(0),
+        inner: McpRequest::ListTools(ListToolsParams::default()),
+        extensions: Extensions::new(),
+    };
+
+    let mut tools = match proxy.call(req).await {
+        Ok(resp) => match resp.inner {
+            Ok(McpResponse::ListTools(result)) => result.tools,
+            _ => return None,
+        },
+        Err(_) => return None,
+    };
+    if let Some(visibility) = visibility {
+        tools.retain(|tool| visibility.allows(tool));
+    }
+    Some(tools)
+}
+
 /// Re-index all tools into an existing shared discovery index.
 ///
 /// Called after hot reload adds, removes, or replaces backends to keep
@@ -145,23 +172,20 @@ pub async fn reindex_with_schemas(
     proxy: &mut McpProxy,
     separator: &str,
 ) {
-    use tower::Service;
-    use tower_mcp::protocol::{ListToolsParams, McpRequest, McpResponse, RequestId};
-    use tower_mcp::router::{Extensions, RouterRequest};
+    reindex_with_visibility(index, schemas, proxy, separator, None).await;
+}
 
-    let req = RouterRequest {
-        id: RequestId::Number(0),
-        inner: McpRequest::ListTools(ListToolsParams::default()),
-        extensions: Extensions::new(),
-    };
-
-    let tools = match proxy.call(req).await {
-        Ok(resp) => match resp.inner {
-            Ok(McpResponse::ListTools(result)) => result.tools,
-            _ => vec![],
-        },
-        Err(_) => vec![],
-    };
+/// Refresh the index and schemas, restricted to tools `visibility` allows.
+pub async fn reindex_with_visibility(
+    index: &SharedDiscoveryIndex,
+    schemas: &SchemaStore,
+    proxy: &mut McpProxy,
+    separator: &str,
+    visibility: Option<&crate::filter::ToolVisibility>,
+) {
+    let tools = list_visible_tools(proxy, visibility)
+        .await
+        .unwrap_or_default();
 
     let mut registry = DiscoveryRegistry::new();
     index_tools(&mut registry, &tools, separator);

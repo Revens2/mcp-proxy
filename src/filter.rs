@@ -152,6 +152,9 @@ impl<S> Layer<S> for CapabilityFilterLayer {
 pub struct CapabilityFilterService<S> {
     inner: S,
     filters: Arc<Vec<BackendFilter>>,
+    /// `Some(meta prefix)` enables fail-closed mode: anything outside a
+    /// configured filter, other than the gateway meta-tools, is denied.
+    default_deny: Option<Arc<str>>,
 }
 
 impl<S> CapabilityFilterService<S> {
@@ -160,7 +163,67 @@ impl<S> CapabilityFilterService<S> {
         Self {
             inner,
             filters: Arc::new(filters),
+            default_deny: None,
         }
+    }
+
+    /// Create a fail-closed filter (`security.default_deny`).
+    ///
+    /// Tools, resources, and prompts are only visible and callable when a
+    /// configured [`BackendFilter`] namespace matches and allows them. Names
+    /// outside every namespace (for example a backend added at runtime) are
+    /// hidden and rejected, except the gateway's own `meta_prefix` capabilities.
+    /// Completion and resource subscription requests are rejected.
+    pub fn with_default_deny(
+        inner: S,
+        filters: Vec<BackendFilter>,
+        meta_prefix: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner,
+            filters: Arc::new(filters),
+            default_deny: Some(Arc::from(meta_prefix.into())),
+        }
+    }
+}
+
+/// Visibility rules shared by `ListTools` filtering and the discovery index,
+/// so search results and schemas never reveal a tool that cannot be called.
+#[derive(Clone)]
+pub struct ToolVisibility {
+    filters: Arc<Vec<BackendFilter>>,
+    default_deny: Option<Arc<str>>,
+}
+
+impl ToolVisibility {
+    /// Visibility for the given filters; `meta_prefix` enables fail-closed mode.
+    pub fn new(filters: Vec<BackendFilter>, meta_prefix: Option<String>) -> Self {
+        Self {
+            filters: Arc::new(filters),
+            default_deny: meta_prefix.map(Arc::from),
+        }
+    }
+
+    /// The visibility the configured capability filter enforces, if any.
+    pub fn from_config(config: &crate::config::ProxyConfig) -> anyhow::Result<Option<Self>> {
+        let filters = config
+            .backends
+            .iter()
+            .filter_map(|b| b.build_filter(&config.proxy.separator).transpose())
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let meta_prefix = config
+            .security
+            .default_deny
+            .then(|| format!("proxy{}", config.proxy.separator));
+        if filters.is_empty() && meta_prefix.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Self::new(filters, meta_prefix)))
+    }
+
+    /// Whether a namespaced tool may be listed, indexed, and called.
+    pub fn allows(&self, tool: &tower_mcp::ToolDefinition) -> bool {
+        tool_listed(&self.filters, self.default_deny.as_deref(), tool)
     }
 }
 
@@ -182,41 +245,31 @@ where
 
     fn call(&mut self, req: RouterRequest) -> Self::Future {
         let filters = Arc::clone(&self.filters);
+        let default_deny = self.default_deny.clone();
+        let meta = default_deny.as_deref();
         let request_id = req.id.clone();
 
         // Check if this is a call/read/get for a filtered capability
-        match &req.inner {
-            McpRequest::CallTool(params) => {
-                if let Some(reason) = check_tool_denied(&filters, &params.name) {
-                    return Box::pin(async move {
-                        Ok(RouterResponse {
-                            id: request_id,
-                            inner: Err(JsonRpcError::invalid_params(reason)),
-                        })
-                    });
-                }
+        let denied = match &req.inner {
+            McpRequest::CallTool(params) => check_tool_denied(&filters, meta, &params.name),
+            McpRequest::ReadResource(params) => check_resource_denied(&filters, meta, &params.uri),
+            McpRequest::GetPrompt(params) => check_prompt_denied(&filters, meta, &params.name),
+            McpRequest::Complete(_)
+            | McpRequest::SubscribeResource(_)
+            | McpRequest::UnsubscribeResource(_)
+                if meta.is_some() =>
+            {
+                Some("Method not available on this gateway".to_string())
             }
-            McpRequest::ReadResource(params) => {
-                if let Some(reason) = check_resource_denied(&filters, &params.uri) {
-                    return Box::pin(async move {
-                        Ok(RouterResponse {
-                            id: request_id,
-                            inner: Err(JsonRpcError::invalid_params(reason)),
-                        })
-                    });
-                }
-            }
-            McpRequest::GetPrompt(params) => {
-                if let Some(reason) = check_prompt_denied(&filters, &params.name) {
-                    return Box::pin(async move {
-                        Ok(RouterResponse {
-                            id: request_id,
-                            inner: Err(JsonRpcError::invalid_params(reason)),
-                        })
-                    });
-                }
-            }
-            _ => {}
+            _ => None,
+        };
+        if let Some(reason) = denied {
+            return Box::pin(async move {
+                Ok(RouterResponse {
+                    id: request_id,
+                    inner: Err(JsonRpcError::invalid_params(reason)),
+                })
+            });
         }
 
         let fut = self.inner.call(req);
@@ -228,60 +281,27 @@ where
             if let Ok(ref mut mcp_resp) = resp.inner {
                 match mcp_resp {
                     McpResponse::ListTools(result) => {
-                        result.tools.retain(|tool| {
-                            for f in filters.iter() {
-                                if let Some(local_name) = tool.name.strip_prefix(&f.namespace) {
-                                    if !f.tool_filter.allows(local_name) {
-                                        return false;
-                                    }
-                                    // Annotation-based filtering
-                                    if let Some(ref annotations) = tool.annotations {
-                                        if f.hide_destructive && annotations.destructive_hint {
-                                            return false;
-                                        }
-                                        if f.read_only_only && !annotations.read_only_hint {
-                                            return false;
-                                        }
-                                    } else if f.read_only_only {
-                                        // No annotations = not known to be read-only
-                                        return false;
-                                    }
-                                    return true;
-                                }
-                            }
-                            true
-                        });
+                        let meta = default_deny.as_deref();
+                        result
+                            .tools
+                            .retain(|tool| tool_listed(&filters, meta, tool));
                     }
                     McpResponse::ListResources(result) => {
+                        let meta = default_deny.as_deref();
                         result.resources.retain(|resource| {
-                            for f in filters.iter() {
-                                if let Some(local_uri) = resource.uri.strip_prefix(&f.namespace) {
-                                    return f.resource_filter.allows(local_uri);
-                                }
-                            }
-                            true
+                            check_resource_denied(&filters, meta, &resource.uri).is_none()
                         });
                     }
                     McpResponse::ListResourceTemplates(result) => {
+                        let meta = default_deny.as_deref();
                         result.resource_templates.retain(|template| {
-                            for f in filters.iter() {
-                                if let Some(local_uri) =
-                                    template.uri_template.strip_prefix(&f.namespace)
-                                {
-                                    return f.resource_filter.allows(local_uri);
-                                }
-                            }
-                            true
+                            check_resource_denied(&filters, meta, &template.uri_template).is_none()
                         });
                     }
                     McpResponse::ListPrompts(result) => {
+                        let meta = default_deny.as_deref();
                         result.prompts.retain(|prompt| {
-                            for f in filters.iter() {
-                                if let Some(local_name) = prompt.name.strip_prefix(&f.namespace) {
-                                    return f.prompt_filter.allows(local_name);
-                                }
-                            }
-                            true
+                            check_prompt_denied(&filters, meta, &prompt.name).is_none()
                         });
                     }
                     _ => {}
@@ -293,44 +313,86 @@ where
     }
 }
 
+/// The filter whose namespace prefixes `name`, with the backend-local name.
+///
+/// `security.default_deny` validation guarantees namespaces cannot prefix one
+/// another, so the first match is the only match in fail-closed mode.
+fn matching_filter<'a, 'n>(
+    filters: &'a [BackendFilter],
+    name: &'n str,
+) -> Option<(&'a BackendFilter, &'n str)> {
+    filters.iter().find_map(|f| {
+        name.strip_prefix(f.namespace.as_str())
+            .map(|local| (f, local))
+    })
+}
+
+/// Whether a name outside every filter namespace is denied.
+fn unmatched_denied(meta: Option<&str>, name: &str) -> bool {
+    meta.is_some_and(|prefix| !name.starts_with(prefix))
+}
+
+/// Whether a tool definition survives `ListTools` filtering.
+fn tool_listed(
+    filters: &[BackendFilter],
+    meta: Option<&str>,
+    tool: &tower_mcp::ToolDefinition,
+) -> bool {
+    let Some((f, local_name)) = matching_filter(filters, &tool.name) else {
+        return !unmatched_denied(meta, &tool.name);
+    };
+    if !f.tool_filter.allows(local_name) {
+        return false;
+    }
+    // Annotation-based filtering
+    match tool.annotations {
+        Some(ref annotations) => {
+            !(f.hide_destructive && annotations.destructive_hint
+                || f.read_only_only && !annotations.read_only_hint)
+        }
+        // No annotations = not known to be read-only
+        None => !f.read_only_only,
+    }
+}
+
 /// Check if a namespaced tool name is denied by any filter.
 /// Returns Some(reason) if denied.
-fn check_tool_denied(filters: &[BackendFilter], namespaced_name: &str) -> Option<String> {
-    for f in filters {
-        if let Some(local_name) = namespaced_name.strip_prefix(&f.namespace) {
-            if !f.tool_filter.allows(local_name) {
-                return Some(format!("Tool not available: {}", namespaced_name));
-            }
-            return None;
-        }
-    }
-    None
+fn check_tool_denied(
+    filters: &[BackendFilter],
+    meta: Option<&str>,
+    namespaced_name: &str,
+) -> Option<String> {
+    let allowed = match matching_filter(filters, namespaced_name) {
+        Some((f, local_name)) => f.tool_filter.allows(local_name),
+        None => !unmatched_denied(meta, namespaced_name),
+    };
+    (!allowed).then(|| format!("Tool not available: {}", namespaced_name))
 }
 
 /// Check if a namespaced resource URI is denied by any filter.
-fn check_resource_denied(filters: &[BackendFilter], namespaced_uri: &str) -> Option<String> {
-    for f in filters {
-        if let Some(local_uri) = namespaced_uri.strip_prefix(&f.namespace) {
-            if !f.resource_filter.allows(local_uri) {
-                return Some(format!("Resource not available: {}", namespaced_uri));
-            }
-            return None;
-        }
-    }
-    None
+fn check_resource_denied(
+    filters: &[BackendFilter],
+    meta: Option<&str>,
+    namespaced_uri: &str,
+) -> Option<String> {
+    let allowed = match matching_filter(filters, namespaced_uri) {
+        Some((f, local_uri)) => f.resource_filter.allows(local_uri),
+        None => !unmatched_denied(meta, namespaced_uri),
+    };
+    (!allowed).then(|| format!("Resource not available: {}", namespaced_uri))
 }
 
 /// Check if a namespaced prompt name is denied by any filter.
-fn check_prompt_denied(filters: &[BackendFilter], namespaced_name: &str) -> Option<String> {
-    for f in filters {
-        if let Some(local_name) = namespaced_name.strip_prefix(&f.namespace) {
-            if !f.prompt_filter.allows(local_name) {
-                return Some(format!("Prompt not available: {}", namespaced_name));
-            }
-            return None;
-        }
-    }
-    None
+fn check_prompt_denied(
+    filters: &[BackendFilter],
+    meta: Option<&str>,
+    namespaced_name: &str,
+) -> Option<String> {
+    let allowed = match matching_filter(filters, namespaced_name) {
+        Some((f, local_name)) => f.prompt_filter.allows(local_name),
+        None => !unmatched_denied(meta, namespaced_name),
+    };
+    (!allowed).then(|| format!("Prompt not available: {}", namespaced_name))
 }
 
 /// Tower layer that produces a [`SearchModeFilterService`].

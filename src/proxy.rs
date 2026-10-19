@@ -155,10 +155,13 @@ impl Proxy {
         let discovery_enabled = config.proxy.tool_discovery
             || config.proxy.tool_exposure == crate::config::ToolExposure::Search;
         #[cfg(feature = "discovery")]
+        let discovery_visibility = crate::filter::ToolVisibility::from_config(&config)?;
+        #[cfg(feature = "discovery")]
         let (discovery_index, discovery_schemas, discovery_tools) = if discovery_enabled {
-            let (index, schemas) = crate::discovery::build_index_with_schemas(
+            let (index, schemas) = crate::discovery::build_index_with_visibility(
                 &mut proxy_for_caller,
                 &config.proxy.separator,
+                discovery_visibility.as_ref(),
             )
             .await;
             let tools = crate::discovery::build_discovery_tools_with_schemas(
@@ -243,6 +246,11 @@ impl Proxy {
                         idx.clone(),
                         schemas.clone(),
                         self.config.proxy.separator.clone(),
+                        // Validated at construction; reindexing keeps the same
+                        // startup policy as the frozen capability filter.
+                        crate::filter::ToolVisibility::from_config(&self.config)
+                            .ok()
+                            .flatten(),
                     )
                 }),
             Ok(self.reload_policy.clone()),
@@ -1057,7 +1065,18 @@ fn build_middleware_stack(
         .filter_map(|b| b.build_filter(&config.proxy.separator).transpose())
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    if !filters.is_empty() {
+    if config.security.default_deny {
+        let meta_prefix = format!("proxy{}", config.proxy.separator);
+        tracing::info!(
+            backends = filters.len(),
+            "Fail-closed capability filtering (security.default_deny)"
+        );
+        service = BoxCloneService::new(CapabilityFilterService::with_default_deny(
+            service,
+            filters,
+            meta_prefix,
+        ));
+    } else if !filters.is_empty() {
         for f in &filters {
             tracing::info!(
                 backend = %f.namespace.trim_end_matches(&config.proxy.separator),

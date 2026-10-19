@@ -112,7 +112,8 @@ pub(crate) async fn register_admin_tools_with_policy(
     let skills: Vec<tower_mcp::Prompt> = vec![];
 
     let state_connections = state.reload_policy.connections().clone();
-    let router = build_admin_router(state, discovery_tools, search_mode, skills);
+    let public_status = config.security.default_deny;
+    let router = build_admin_router(state, discovery_tools, search_mode, public_status, skills);
     let transport = ChannelTransport::new(router);
 
     proxy
@@ -124,6 +125,7 @@ fn build_admin_router(
     state: AdminToolState,
     discovery_tools: Option<Vec<tower_mcp::Tool>>,
     search_mode: bool,
+    public_status: bool,
     skills: Vec<tower_mcp::Prompt>,
 ) -> McpRouter {
     let state_for_backends = state.clone();
@@ -276,6 +278,42 @@ fn build_admin_router(
         router = router.tool(call_tool);
     }
 
+    if public_status {
+        // Ordinary-caller diagnostic: backend names and health only. Errors,
+        // transports, timings, and URLs stay on the management plane.
+        let state_for_status = state.clone();
+        let backend_status = ToolBuilder::new("backend_status")
+            .description("Report whether each gateway backend is currently reachable")
+            .read_only()
+            .handler(move |_: NoParams| {
+                let s = state_for_status.clone();
+                async move {
+                    let health = s.admin_state.health().await;
+                    let backends: Vec<BackendStatus> = health
+                        .iter()
+                        .map(|b| BackendStatus {
+                            name: b.namespace.clone(),
+                            healthy: b.healthy,
+                        })
+                        .collect();
+                    let healthy = backends.iter().filter(|b| b.healthy).count();
+                    let result = BackendStatusResult {
+                        status: if healthy == backends.len() {
+                            "healthy"
+                        } else {
+                            "degraded"
+                        },
+                        backends,
+                    };
+                    Ok(CallToolResult::text(
+                        serde_json::to_string_pretty(&result).unwrap(),
+                    ))
+                }
+            })
+            .build();
+        router = router.tool(backend_status);
+    }
+
     if let Some(tools) = discovery_tools {
         for tool in tools {
             router = router.tool(tool);
@@ -288,6 +326,18 @@ fn build_admin_router(
     }
 
     router
+}
+
+#[derive(Serialize)]
+struct BackendStatus {
+    name: String,
+    healthy: bool,
+}
+
+#[derive(Serialize)]
+struct BackendStatusResult {
+    status: &'static str,
+    backends: Vec<BackendStatus>,
 }
 
 #[derive(Serialize)]
@@ -394,7 +444,7 @@ mod tests {
             reload_policy: test_policy(),
         };
 
-        let router = build_admin_router(state, None, false, vec![]);
+        let router = build_admin_router(state, None, false, false, vec![]);
         let transport = ChannelTransport::new(router);
 
         let mut test_proxy = McpProxy::builder("verify", "1.0.0")
@@ -425,7 +475,7 @@ mod tests {
             reload_policy: test_policy(),
         };
 
-        let router = build_admin_router(state, None, true, vec![]);
+        let router = build_admin_router(state, None, true, false, vec![]);
         let transport = ChannelTransport::new(router);
 
         let mut test_proxy = McpProxy::builder("verify", "1.0.0")
@@ -479,7 +529,7 @@ mod tests {
             )
             .build();
 
-        let router = build_admin_router(state, Some(vec![extra_tool]), false, vec![]);
+        let router = build_admin_router(state, Some(vec![extra_tool]), false, false, vec![]);
         let transport = ChannelTransport::new(router);
 
         let mut test_proxy = McpProxy::builder("verify", "1.0.0")
@@ -508,7 +558,7 @@ mod tests {
             reload_policy: test_policy(),
         };
 
-        let router = build_admin_router(state, None, false, vec![]);
+        let router = build_admin_router(state, None, false, false, vec![]);
         let transport = ChannelTransport::new(router);
 
         let mut test_proxy = McpProxy::builder("verify", "1.0.0")

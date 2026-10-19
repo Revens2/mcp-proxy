@@ -200,6 +200,7 @@ mod tests {
             "expose_resources":["fixture://x"], "hide_resources":["fixture://x"],
             "expose_prompts":["prompt"], "hide_prompts":["prompt"],
             "hide_destructive":true, "read_only_only":true,
+            "read_only_targets":["ping"],
             "failover_for":"api", "priority":1, "canary_of":"api", "weight":20
         });
         let expected: std::collections::BTreeSet<_> = base["backends"][0]
