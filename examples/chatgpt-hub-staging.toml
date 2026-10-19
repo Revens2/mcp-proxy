@@ -1,0 +1,78 @@
+# Rust MCP Hub — SAFE STAGING TEMPLATE, never deploy as-is
+# Replace example.invalid issuer/resource identities with a dedicated configured
+# OAuth authorization server BEFORE any network exposure.
+# Mock loopback backends must be replaced by authenticated gateways with exact
+# allowlists; source secrets only from a protected runtime secret store.
+# The binary enables its additional security guard for name = "chatgpt-hub".
+
+[proxy]
+name = "chatgpt-hub"
+version = "0.1.0"
+separator = "__"
+hot_reload = true
+tool_discovery = true
+tool_exposure = "search"
+instructions = "Use proxy__search_tools to find allowed capabilities, proxy__get_tool for the complete schema, then proxy__call_tool. This staging endpoint grants read-only access."
+
+[proxy.listen]
+host = "127.0.0.1"
+port = 39021
+
+[proxy.rate_limit]
+requests = 15
+period_seconds = 1
+
+# These are STAGING placeholders, not production sockets.
+# Use the OAuth-enforcing gateways, never bypass them via backend ports.
+[[backends]]
+name = "vault"
+transport = "http"
+url = "http://127.0.0.1:39031/mcp"
+bearer_token = "${HUB_VAULT_READ_TOKEN}"
+forward_auth = false
+expose_tools = ["search_vault", "read_note"]
+read_only_only = true
+hide_destructive = true
+
+[backends.timeout]
+seconds = 25
+
+[[backends]]
+name = "github"
+transport = "http"
+url = "http://127.0.0.1:39032/mcp"
+bearer_token = "${HUB_GITHUB_READ_TOKEN}"
+forward_auth = false
+expose_tools = ["get_file_contents", "search_repositories"]
+read_only_only = true
+hide_destructive = true
+
+[backends.timeout]
+seconds = 25
+
+# Public OAuth audience must be the exact public MCP resource URL, not loopback.
+# JWT validation only. The authorization server remains separate.
+[auth]
+type = "jwt"
+issuer = "https://auth.example.invalid"
+audience = "https://hub.example.invalid/mcp"
+jwks_uri = "https://auth.example.invalid/.well-known/jwks.json"
+
+[[auth.roles]]
+name = "reader"
+allow_tools = ["vault__search_vault", "vault__read_note", "github__get_file_contents", "github__search_repositories"]
+
+[auth.role_mapping]
+claim = "scope"
+default_deny = true
+
+[auth.role_mapping.mapping]
+"hub:read" = "reader"
+
+[security]
+max_argument_size = 131072
+
+[observability]
+audit = true
+log_level = "warn"
+json_logs = true
