@@ -16,11 +16,12 @@ pub fn validate(config: &ProxyConfig) -> Result<()> {
         "hub requires server-side tool discovery and search-only exposure"
     );
     ensure!(config.auth.is_some(), "hub requires inbound authentication");
+    ensure!(!config.proxy.hot_reload, "hub staging forbids unreviewed dynamic policy expansion; restart after reviewed config changes");
     ensure!(config.composite_tools.is_empty(), "hub disallows composite tool fan-out");
     ensure!(!config.backends.is_empty(), "hub requires an explicit allowlisted backend");
 
     for backend in &config.backends {
-        ensure!(backend.transport_is_http(), "hub permits only HTTP backends in staging: {}", backend.name);
+        ensure!(matches!(&backend.transport, TransportType::Http), "hub permits only HTTP backends in staging: {}", backend.name);
         ensure!(safe_identifier(&backend.name), "unsafe backend namespace: {}", backend.name);
         ensure!(!backend.forward_auth, "upstream token passthrough forbidden: {}", backend.name);
         ensure!(backend.expose_tools.len() > 0, "backend requires an explicit tool allowlist: {}", backend.name);
@@ -41,16 +42,6 @@ pub fn validate(config: &ProxyConfig) -> Result<()> {
         );
     }
     Ok(())
-}
-
-trait HttpBackend {
-    fn transport_is_http(&self) -> bool;
-}
-
-impl HttpBackend for mcp_proxy::config::BackendConfig {
-    fn transport_is_http(&self) -> bool {
-        matches!(self.transport, TransportType::Http)
-    }
 }
 
 fn safe_identifier(value: &str) -> bool {
