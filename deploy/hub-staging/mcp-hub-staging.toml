@@ -1,0 +1,124 @@
+# MCP hub (staging) -- one ChatGPT connector in front of several gateways.
+#
+# No secret in this file: every credential is an environment reference that
+# systemd loads from /etc/mcp-hub-staging/hub.env (mode 0600, user mcp-hub).
+#
+#   MCP_HUB_INTROSPECTION_SECRET  shared with hub-auth (introspection client)
+#   MCP_HUB_VAULT_TOKEN           dedicated vault-ro token (only its SHA-256
+#                                 is registered on the vault-ro side)
+#   MCP_HUB_GITHUB_TOKEN          static token of the staging GitHub facade,
+#                                 restricted to github:lecture
+#
+# Adding a gateway: append a [[backends]] block with an exact
+# read_only_targets list, run `mcp-proxy --check`, then restart this service.
+# The public surface (proxy_* meta-tools) does not change, so ChatGPT does not
+# need to reconnect. See docs/CHATGPT-HUB.md.
+
+[proxy]
+name = "mcp-hub-staging"
+version = "0.6.0"
+separator = "_"
+tool_exposure = "search"
+tool_discovery = true
+# Connection fields (url, timeouts) reload live; policy changes require restart.
+hot_reload = true
+instructions = """Read-only MCP hub. Find tools with proxy_search_tools, read the \
+input schema with proxy_get_tool, then call proxy_call_tool with the tool name and \
+arguments. proxy_backend_status reports which gateways are reachable. Only listed \
+read-only tools are callable; anything else is refused."""
+
+[proxy.listen]
+host = "127.0.0.1"
+port = 18984
+
+[proxy.rate_limit]
+requests = 120
+period_seconds = 60
+
+[security]
+default_deny = true
+require_auth_outside_loopback = true
+max_argument_size = 65536
+# No admin_token: management is disabled, so the only credential the public
+# endpoint accepts is a hub-auth access token validated by introspection.
+
+[auth]
+type = "oauth"
+issuer = "https://mymcps.duckdns.org/oauth/hub-staging"
+audience = "https://mymcps.duckdns.org/hub-staging/mcp"
+token_validation = "introspection"
+introspection_endpoint = "http://127.0.0.1:18983/introspect"
+client_id = "mcp-hub-staging"
+client_secret = "${MCP_HUB_INTROSPECTION_SECRET}"
+required_scopes = ["hub:lecture"]
+
+# --- Gateway 1: Vault/RAG read-only context (vault-ro) ----------------------
+# Read-only by construction on the server side; the hub allowlist repeats it.
+[[backends]]
+name = "vault"
+transport = "http"
+url = "http://127.0.0.1:8811/mcp"
+bearer_token = "${MCP_HUB_VAULT_TOKEN}"
+forward_auth = false
+read_only_targets = [
+    "search_vault",
+    "search_notes",
+    "read_note",
+    "list_notes",
+    "get_graph_context",
+    "context_status",
+]
+
+[backends.timeout]
+seconds = 30
+
+[backends.concurrency]
+max_concurrent = 4
+
+# --- Gateway 2: GitHub through a staging github-gateway-rs facade ----------
+# The facade applies the GitHub tool policy (fail-closed) and only grants
+# github:lecture to this token; the hub allowlist is a second, narrower layer.
+# Secret scanning, dependabot, job logs, notifications, gists, and team data
+# are deliberately not exposed in V1.
+[[backends]]
+name = "github"
+transport = "http"
+url = "http://127.0.0.1:18985/mcp"
+bearer_token = "${MCP_HUB_GITHUB_TOKEN}"
+forward_auth = false
+read_only_targets = [
+    "get_me",
+    "search_repositories",
+    "search_code",
+    "search_issues",
+    "search_pull_requests",
+    "search_commits",
+    "get_file_contents",
+    "get_repository_tree",
+    "list_branches",
+    "list_tags",
+    "get_tag",
+    "list_commits",
+    "get_commit",
+    "list_releases",
+    "get_latest_release",
+    "get_release_by_tag",
+    "list_issues",
+    "issue_read",
+    "list_pull_requests",
+    "pull_request_read",
+    "list_label",
+    "get_label",
+    "actions_list",
+    "actions_get",
+]
+
+[backends.timeout]
+seconds = 30
+
+[backends.concurrency]
+max_concurrent = 4
+
+[observability]
+audit = true
+json_logs = true

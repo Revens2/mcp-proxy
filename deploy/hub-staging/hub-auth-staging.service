@@ -1,0 +1,51 @@
+[Unit]
+Description=MCP hub staging OAuth authorization server (hub-auth, loopback 18983)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mcp-hub
+Group=mcp-hub
+WorkingDirectory=/opt/mcp-hub-staging
+Environment=HUB_AUTH_ISSUER=https://mymcps.duckdns.org/oauth/hub-staging
+Environment=HUB_AUTH_RESOURCE=https://mymcps.duckdns.org/hub-staging/mcp
+Environment=HUB_AUTH_PORT=18983
+Environment=HUB_AUTH_INTROSPECTION_CLIENT_ID=mcp-hub-staging
+Environment=HUB_AUTH_REDIRECT_PREFIXES=https://chatgpt.com/
+Environment=HUB_AUTH_CONSENT_HASH_FILE=/etc/mcp-hub-staging/consent.hash
+Environment=HUB_AUTH_INTROSPECTION_SECRET_FILE=/etc/mcp-hub-staging/introspection.secret
+ExecStart=/opt/mcp-hub-staging/hub-auth
+# Grants live in memory: restarting this unit forces ChatGPT to reconnect.
+# Restart only for upgrades; the hub itself can restart freely.
+Restart=on-failure
+RestartSec=5
+MemoryMax=128M
+CPUQuota=50%
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/opt/mcp-hub-staging
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

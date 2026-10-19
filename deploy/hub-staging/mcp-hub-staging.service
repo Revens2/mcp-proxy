@@ -1,0 +1,48 @@
+[Unit]
+Description=MCP hub staging (mcp-proxy, search mode, read-only, loopback 18984)
+After=network-online.target hub-auth-staging.service
+Wants=network-online.target
+
+[Service]
+User=mcp-hub
+Group=mcp-hub
+WorkingDirectory=/opt/mcp-hub-staging
+# MCP_HUB_INTROSPECTION_SECRET, MCP_HUB_VAULT_TOKEN, MCP_HUB_GITHUB_TOKEN
+EnvironmentFile=/etc/mcp-hub-staging/hub.env
+ExecStartPre=/opt/mcp-hub-staging/mcp-proxy --check --config /opt/mcp-hub-staging/mcp-hub-staging.toml
+ExecStart=/opt/mcp-hub-staging/mcp-proxy --config /opt/mcp-hub-staging/mcp-hub-staging.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+MemoryMax=512M
+CPUQuota=100%
+TasksMax=256
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/opt/mcp-hub-staging
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Loopback only: hub-auth, vault-ro, and the staging GitHub facade.
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

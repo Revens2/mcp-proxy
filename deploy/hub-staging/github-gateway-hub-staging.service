@@ -1,0 +1,51 @@
+[Unit]
+Description=GitHub MCP facade for the MCP hub staging (read-only token, loopback 18985)
+After=network-online.target github-mcp-gateway.service
+Wants=network-online.target
+
+# Second instance of the existing github-gateway-rs binary. It applies the same
+# fail-closed GitHub tool policy as production; its only static token carries
+# github:lecture, so every write tool is refused by the facade itself. No OAuth
+# store is mounted and nginx does not route to it: only the hub can call it.
+
+[Service]
+User=github-app
+Group=github-app
+WorkingDirectory=/opt/github-gateway-rs
+# Issuer is required by the binary but never published for this instance.
+Environment=GITHUB_MCP_RS_ISSUER=https://mymcps.duckdns.org/oauth/github-hub-staging
+Environment=GITHUB_MCP_RS_UPSTREAM=http://127.0.0.1:8800
+Environment=GITHUB_MCP_RS_PORT=18985
+Environment=GITHUB_MCP_RS_TOKEN_FILE=/etc/mcp-hub-staging/github-facade.token
+Environment="GITHUB_MCP_RS_TOKEN_SCOPES=github:lecture"
+# Same upstream credential as production until a fine-grained read-only PAT
+# replaces it (recommended before production).
+Environment=GITHUB_MCP_RS_UPSTREAM_TOKEN_FILE=/srv/github/secrets/github-pat
+ExecStart=/opt/github-gateway-rs/github-gateway-rs
+Restart=on-failure
+RestartSec=5
+MemoryMax=128M
+CPUQuota=50%
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

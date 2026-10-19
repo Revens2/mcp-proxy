@@ -1,0 +1,53 @@
+# ChatGPT web hub -- staging shape, loopback only.
+#
+# This file intentionally contains no real upstream. Replace the placeholder
+# backend with the staging MCP server you are authorised to test, and keep the
+# read-only allowlist exact. Do not add a generic write/execute wrapper.
+#
+# Secrets are environment references only:
+#   MCP_HUB_STAGING_TOKEN        inbound bearer token for the MCP endpoint
+#   MCP_HUB_STAGING_ADMIN_TOKEN  dedicated management credential
+#
+# `require_auth_outside_loopback` makes a non-loopback bind fail closed when
+# inbound auth is missing. Never expose this file by editing the bind address
+# without also configuring OAuth or bearer auth.
+
+[proxy]
+name = "chatgpt-hub-staging"
+version = "0.6.0"
+separator = "_"
+hot_reload = true
+tool_discovery = true
+tool_exposure = "search"
+instructions = "Staging gateway. Read-only tools only. Discover with proxy_search_tools, inspect with proxy_get_tool, invoke with proxy_call_tool."
+
+[proxy.listen]
+host = "127.0.0.1"
+port = 8931
+
+[security]
+require_auth_outside_loopback = true
+# Fail closed: only exact read_only_targets are visible or callable.
+default_deny = true
+admin_token = "${MCP_HUB_STAGING_ADMIN_TOKEN}"
+
+[auth]
+type = "bearer"
+tokens = ["${MCP_HUB_STAGING_TOKEN}"]
+
+# Placeholder only: loopback discard-style port, not a deployed service.
+# Replace url with the staging gateway. Never point this at a production
+# upstream or bypass the upstream gateway/OAuth policy.
+[[backends]]
+name = "staging"
+transport = "http"
+url = "http://127.0.0.1:19090/mcp"
+# Explicit allowlist is authoritative; annotations are ignored so a missing
+# read_only_hint cannot widen access. Any unlisted call is denied, including
+# proxy_call_tool. Replace these names with the read-only tools you validated.
+read_only_targets = ["read_note", "list_notes"]
+# Never forward the downstream ChatGPT/client token to the upstream.
+forward_auth = false
+
+[backends.timeout]
+seconds = 15
