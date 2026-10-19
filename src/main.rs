@@ -4,6 +4,8 @@ use anyhow::Result;
 use clap::Parser;
 
 use mcp_proxy::Proxy;
+
+mod hub_guard;
 use mcp_proxy::config::ProxyConfig;
 
 #[derive(Parser)]
@@ -65,6 +67,12 @@ async fn main() -> Result<()> {
 
         config
     };
+
+    // Extra fail-closed staging invariants for the ChatGPT Hub profile.
+    // The upstream proxy remains unchanged for all other configurations.
+    if config.proxy.name == "chatgpt-hub" {
+        hub_guard::validate(&config)?;
+    }
 
     config.resolve_env_vars()?;
     if cli.check {
