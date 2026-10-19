@@ -5,7 +5,7 @@
 //! validated JWT claims, or a separate confirmation path for writes.
 
 use anyhow::{Result, ensure};
-use mcp_proxy::config::{ProxyConfig, ToolExposure, TransportType};
+use mcp_proxy::config::{AuthConfig, ProxyConfig, ToolExposure, TransportType};
 
 /// Applied automatically when the proxy is named `chatgpt-hub`.
 pub fn validate(config: &ProxyConfig) -> Result<()> {
@@ -15,7 +15,22 @@ pub fn validate(config: &ProxyConfig) -> Result<()> {
         config.proxy.tool_discovery && config.proxy.tool_exposure == ToolExposure::Search,
         "hub requires server-side tool discovery and search-only exposure"
     );
-    ensure!(config.auth.is_some(), "hub requires inbound authentication");
+    // A bearer token without an identity claim cannot establish a mono-user Hub.
+    // Authenticated users must map to exactly one explicitly permitted subject.
+    let (roles, mapping) = match config.auth.as_ref() {
+        Some(AuthConfig::Jwt { roles, role_mapping, .. })
+        | Some(AuthConfig::OAuth { roles, role_mapping, .. }) => {
+            (roles, role_mapping.as_ref())
+        }
+        _ => anyhow::bail!("hub requires JWT/OAuth identity-bound authentication"),
+    };
+    let mapping = mapping.ok_or_else(|| anyhow::anyhow!("hub requires an explicit RBAC role mapping"))?;
+    ensure!(
+        mapping.claim == "sub" && mapping.default_deny && mapping.mapping.len() == 1,
+        "hub requires one allowlisted subject and default-deny identity mapping"
+    );
+    ensure!(!roles.is_empty(), "hub requires explicit RBAC roles");
+    ensure!(roles.iter().all(|role| !role.allow_tools.is_empty()), "hub roles cannot grant all tools");
     ensure!(!config.proxy.hot_reload, "hub staging forbids unreviewed dynamic policy expansion; restart after reviewed config changes");
     ensure!(config.composite_tools.is_empty(), "hub disallows composite tool fan-out");
     ensure!(!config.backends.is_empty(), "hub requires an explicit allowlisted backend");
@@ -40,6 +55,17 @@ pub fn validate(config: &ProxyConfig) -> Result<()> {
             "staging hub disables shadow traffic, canary, and failover: {}",
             backend.name
         );
+    }
+    // A role may only grant names present in the explicit upstream allowlists.
+    let allowed: std::collections::HashSet<String> = config.backends.iter()
+        .flat_map(|backend| backend.expose_tools.iter().map(move |tool| {
+            format!("{}{}{}", backend.name, config.proxy.separator, tool)
+        }))
+        .collect();
+    for role in roles {
+        for tool in &role.allow_tools {
+            ensure!(allowed.contains(tool), "RBAC grants unlisted tool: {}", tool);
+        }
     }
     Ok(())
 }
