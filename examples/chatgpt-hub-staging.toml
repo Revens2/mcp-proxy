@@ -9,7 +9,7 @@
 name = "chatgpt-hub"
 version = "0.1.0"
 separator = "__"
-hot_reload = true
+hot_reload = false
 tool_discovery = true
 tool_exposure = "search"
 instructions = "Use proxy__search_tools to find allowed capabilities, proxy__get_tool for the complete schema, then proxy__call_tool. This staging endpoint grants read-only access."
