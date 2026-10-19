@@ -63,11 +63,11 @@ name = "reader"
 allow_tools = ["vault__search_vault", "vault__read_note", "github__get_file_contents", "github__search_repositories"]
 
 [auth.role_mapping]
-claim = "scope"
+claim = "sub"
 default_deny = true
 
 [auth.role_mapping.mapping]
-"hub:read" = "reader"
+"REPLACE_WITH_VERIFIED_USER_SUB" = "reader"
 
 [security]
 max_argument_size = 131072
