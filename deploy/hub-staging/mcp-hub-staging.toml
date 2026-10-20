@@ -23,7 +23,7 @@ tool_discovery = true
 # Changes are applied by restart (`systemctl restart mcp-hub-staging`); the
 # file watcher stays off: policy changes need a restart anyway.
 hot_reload = false
-instructions = """Read-only MCP hub for vault, github, tasks, calendar, and orch. Find \
+instructions = """Read-only MCP hub for vault, github, tasks, calendar, orch, and excalidraw. Find \
 tools with proxy_search_tools (or proxy_list_tools for the full inventory), read the \
 input schema with proxy_get_tool, then call proxy_call_tool with the tool name and \
 arguments. proxy_backend_status reports which gateways are reachable. Only listed \
@@ -202,6 +202,28 @@ read_only_targets = [
 # The *_wait tools block for up to 60 s.
 [backends.timeout]
 seconds = 75
+
+[backends.concurrency]
+max_concurrent = 4
+
+# Excalidraw: read-only staging instance of the Python gateway
+# (facade-envfile-hub-staging.sh). Drawing (create_view) stays out.
+[[backends]]
+name = "excalidraw"
+transport = "http"
+url = "http://127.0.0.1:18975/mcp"
+bearer_token = "${MCP_HUB_EXCALIDRAW_TOKEN}"
+forward_auth = false
+read_only_targets = [
+    "read_me",
+    "validate_view",
+    "read_checkpoint",
+    "library_list",
+    "library_load",
+]
+
+[backends.timeout]
+seconds = 30
 
 [backends.concurrency]
 max_concurrent = 4
