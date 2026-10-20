@@ -21,7 +21,7 @@ separator = "_"
 tool_exposure = "search"
 tool_discovery = true
 # Changes are applied by restart (`systemctl restart mcp-hub-staging`); the
-# file watcher is off on this host (it retriggered on its own reads).
+# file watcher stays off: policy changes need a restart anyway.
 hot_reload = false
 instructions = """Read-only MCP hub for vault, github, tasks, calendar, and orch. Find \
 tools with proxy_search_tools (or proxy_list_tools for the full inventory), read the \

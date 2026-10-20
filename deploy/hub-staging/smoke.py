@@ -165,6 +165,8 @@ def main():
     check("schema retrieval", "path" in json.dumps(schema.get("input_schema", {})))
 
     check("vault read through hub", ok(s.wrapped("vault_context_status", {})))
+    check("call_tool accepts a discovery id", ok(s.wrapped("vault:context_status", {})))
+    check("discovery id cannot reach meta-tools", not ok(s.wrapped("proxy:add_backend", {})))
     check("github read through hub", ok(s.wrapped("github_get_me", {})))
     for target in ("github_delete_file", "github_create_or_update_file", "github_merge_pull_request",
                    "vault_append_note", "unknown_tool", "proxy_add_backend"):

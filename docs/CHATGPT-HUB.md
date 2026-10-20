@@ -183,8 +183,10 @@ since the hub's last start and restarts the hub once; ChatGPT keeps its grant
 because tokens live in hub-auth. A native reconnect in the engine is the
 proper fix and remains to do.
 
-The file watcher (`hot_reload`) is off in the staging config: on this host it
-retriggered on its own reads (one reload every ~2 s). Changes are applied with
+The file watcher (`hot_reload`) is off in the staging config: policy changes
+need a restart anyway. (Before commit 5a92bd2 the watcher also retriggered on
+its own reads, one reload every ~2 s; it now ignores events that leave the
+file's mtime, inode, and size unchanged.) Apply changes with
 `systemctl restart mcp-hub-staging`.
 
 ## Staging deployment (VPS Étude)
