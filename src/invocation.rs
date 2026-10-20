@@ -143,6 +143,9 @@ where
                 }
                 params.name = target;
                 params.arguments = input.arguments.unwrap_or_default().into();
+                if is_write_wrapper {
+                    req.extensions.insert(crate::filter::ViaWriteWrapper);
+                }
             }
         }
         Box::pin(self.inner.call(req))

@@ -12,6 +12,8 @@ Environment=HUB_AUTH_RESOURCE=https://mymcps.duckdns.org/hub-staging/mcp
 Environment=HUB_AUTH_PORT=18983
 Environment=HUB_AUTH_INTROSPECTION_CLIENT_ID=mcp-hub-staging
 Environment=HUB_AUTH_REDIRECT_PREFIXES=https://chatgpt.com/
+# Also issue hub:ecriture (required by proxy_call_write_tool) with the same consent.
+Environment=HUB_AUTH_ALLOW_WRITES=1
 Environment=HUB_AUTH_CONSENT_HASH_FILE=/etc/mcp-hub-staging/consent.hash
 Environment=HUB_AUTH_INTROSPECTION_SECRET_FILE=/etc/mcp-hub-staging/introspection.secret
 ExecStart=/opt/mcp-hub-staging/hub-auth

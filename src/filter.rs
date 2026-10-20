@@ -198,6 +198,13 @@ impl<S> CapabilityFilterService<S> {
     }
 }
 
+/// Request marker set by the search invocation when a call arrives through
+/// `proxy/call_write_tool`. Write targets are refused without it, so a direct
+/// `tools/call` cannot bypass the destructive wrapper (and the client's
+/// confirmation). Only server code can insert request extensions.
+#[derive(Clone, Copy, Debug)]
+pub struct ViaWriteWrapper;
+
 /// Which public tool names are writes, and the token scope they require.
 ///
 /// Built from `write_targets` when `security.allow_writes` is on. The
@@ -240,6 +247,14 @@ impl WritePolicy {
     }
 
     /// Reason a write is refused for these request extensions, if any.
+    /// Reason a call to a write target is refused, if any.
+    fn refuse_write(&self, extensions: &tower_mcp::router::Extensions) -> Option<String> {
+        if extensions.get::<ViaWriteWrapper>().is_none() {
+            return Some("Write tools are only callable through proxy/call_write_tool".into());
+        }
+        self.missing_scope(extensions)
+    }
+
     fn missing_scope(&self, extensions: &tower_mcp::router::Extensions) -> Option<String> {
         let scope = self.scope.as_deref()?;
         #[cfg(feature = "oauth")]
@@ -325,7 +340,7 @@ where
                     self.writes
                         .as_ref()
                         .filter(|writes| writes.is_write(&params.name))
-                        .and_then(|writes| writes.missing_scope(&req.extensions))
+                        .and_then(|writes| writes.refuse_write(&req.extensions))
                 }),
             McpRequest::ReadResource(params) => check_resource_denied(&filters, meta, &params.uri),
             McpRequest::GetPrompt(params) => check_prompt_denied(&filters, meta, &params.name),

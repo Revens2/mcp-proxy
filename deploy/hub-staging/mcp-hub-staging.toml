@@ -23,11 +23,11 @@ tool_discovery = true
 # Changes are applied by restart (`systemctl restart mcp-hub-staging`); the
 # file watcher stays off: policy changes need a restart anyway.
 hot_reload = false
-instructions = """Read-only MCP hub for vault, github, tasks, calendar, orch, and excalidraw. Find \
-tools with proxy_search_tools (or proxy_list_tools for the full inventory), read the \
-input schema with proxy_get_tool, then call proxy_call_tool with the tool name and \
-arguments. proxy_backend_status reports which gateways are reachable. Only listed \
-read-only tools are callable; anything else is refused."""
+instructions = """MCP hub for vault, github, tasks, calendar, orch, opus, excalidraw, and \
+browser. Find tools with proxy_search_tools (or proxy_list_tools for the full inventory), \
+read the input schema with proxy_get_tool, then call the meta-tool named in "call_with": \
+proxy_call_tool for reads, proxy_call_write_tool for anything that changes state or acts \
+(confirm with the user first). proxy_backend_status reports which gateways are reachable."""
 
 [proxy.listen]
 host = "127.0.0.1"
@@ -41,6 +41,10 @@ period_seconds = 60
 default_deny = true
 require_auth_outside_loopback = true
 max_argument_size = 65536
+# Writes: only through proxy_call_write_tool (destructive, ChatGPT asks for
+# confirmation), only for exact write_targets, and only with hub:ecriture.
+allow_writes = true
+write_scope = "hub:ecriture"
 # No admin_token: management is disabled, so the only credential the public
 # endpoint accepts is a hub-auth access token validated by introspection.
 
@@ -54,8 +58,7 @@ client_id = "mcp-hub-staging"
 client_secret = "${MCP_HUB_INTROSPECTION_SECRET}"
 required_scopes = ["hub:lecture"]
 
-# --- Gateway 1: Vault/RAG read-only context (vault-ro) ----------------------
-# Read-only by construction on the server side; the hub allowlist repeats it.
+# --- vault: Vault/RAG read-only context (vault-ro). Vault writes need a vault-mcp-rs patch (hard-coded token file).
 [[backends]]
 name = "vault"
 transport = "http"
@@ -77,11 +80,7 @@ seconds = 30
 [backends.concurrency]
 max_concurrent = 4
 
-# --- Gateway 2: GitHub through a staging github-gateway-rs facade ----------
-# The facade applies the GitHub tool policy (fail-closed) and only grants
-# github:lecture to this token; the hub allowlist is a second, narrower layer.
-# Secret scanning, dependabot, job logs, notifications, gists, and team data
-# are deliberately not exposed in V1.
+# --- github: GitHub via a staging github-gateway-rs instance (github:lecture github:ecriture); split = gateway politique.py.
 [[backends]]
 name = "github"
 transport = "http"
@@ -89,44 +88,103 @@ url = "http://127.0.0.1:18985/mcp"
 bearer_token = "${MCP_HUB_GITHUB_TOKEN}"
 forward_auth = false
 read_only_targets = [
-    "get_me",
-    "search_repositories",
-    "search_code",
-    "search_issues",
-    "search_pull_requests",
-    "search_commits",
-    "get_file_contents",
-    "get_repository_tree",
-    "list_branches",
-    "list_tags",
-    "get_tag",
-    "list_commits",
-    "get_commit",
-    "list_releases",
-    "get_latest_release",
-    "get_release_by_tag",
-    "list_issues",
-    "issue_read",
-    "list_pull_requests",
-    "pull_request_read",
-    "list_label",
-    "get_label",
-    "actions_list",
     "actions_get",
+    "actions_list",
+    "custom_properties_read",
+    "get_code_quality_finding",
+    "get_code_scanning_alert",
+    "get_commit",
+    "get_dependabot_alert",
+    "get_discussion",
+    "get_discussion_comments",
+    "get_file_contents",
+    "get_gist",
+    "get_global_security_advisory",
+    "get_job_logs",
+    "get_label",
+    "get_latest_release",
+    "get_me",
+    "get_notification_details",
+    "get_release_by_tag",
+    "get_repository_tree",
+    "get_secret_scanning_alert",
+    "get_tag",
+    "get_team_members",
+    "get_teams",
+    "issue_read",
+    "list_branches",
+    "list_code_scanning_alerts",
+    "list_commits",
+    "list_dependabot_alerts",
+    "list_discussion_categories",
+    "list_discussions",
+    "list_gists",
+    "list_global_security_advisories",
+    "list_issue_fields",
+    "list_issue_types",
+    "list_issues",
+    "list_label",
+    "list_notifications",
+    "list_org_repository_security_advisories",
+    "list_pull_requests",
+    "list_releases",
+    "list_repository_collaborators",
+    "list_repository_security_advisories",
+    "list_secret_scanning_alerts",
+    "list_starred_repositories",
+    "list_tags",
+    "pull_request_read",
+    "repository_ruleset_read",
+    "search_code",
+    "search_commits",
+    "search_issues",
+    "search_orgs",
+    "search_pull_requests",
+    "search_repositories",
+    "search_users",
+]
+write_targets = [
+    "actions_run_trigger",
+    "add_comment_to_pending_review",
+    "add_issue_comment",
+    "add_reply_to_pull_request_comment",
+    "assign_copilot_to_issue",
+    "assign_copilot_to_issue_with_intent",
+    "create_branch",
+    "create_gist",
+    "create_or_update_file",
+    "create_pull_request",
+    "create_repository",
+    "create_repository_ruleset",
+    "custom_properties_write",
+    "delete_file",
+    "discussion_comment_write",
+    "dismiss_notification",
+    "fork_repository",
+    "issue_write",
+    "label_write",
+    "manage_notification_subscription",
+    "manage_repository_notification_subscription",
+    "mark_all_notifications_read",
+    "merge_pull_request",
+    "pull_request_review_write",
+    "push_files",
+    "request_copilot_review",
+    "star_repository",
+    "sub_issue_write",
+    "unstar_repository",
+    "update_gist",
+    "update_pull_request",
+    "update_pull_request_branch",
 ]
 
 [backends.timeout]
-seconds = 30
+seconds = 60
 
 [backends.concurrency]
 max_concurrent = 4
 
-# --- Gateways 3-5: read-only staging instances of the Rust facades ---------
-# Created by deploy/hub-staging/facade-hub-staging.sh: same binary and
-# fail-closed policy as production, one static token with the read scope
-# only. Each list below is exactly what the facade's own policy classifies as
-# read for that scope (tools/list with the read token).
-
+# --- tasks: Tasks (CalDAV) via a staging tasks-gateway-rs instance.
 [[backends]]
 name = "tasks"
 transport = "http"
@@ -145,6 +203,14 @@ read_only_targets = [
     "tasks_recently_changed",
     "tasks_history",
 ]
+write_targets = [
+    "tasks_create",
+    "tasks_update",
+    "tasks_complete",
+    "tasks_reopen",
+    "tasks_move",
+    "tasks_delete",
+]
 
 [backends.timeout]
 seconds = 30
@@ -152,6 +218,7 @@ seconds = 30
 [backends.concurrency]
 max_concurrent = 4
 
+# --- calendar: Google Calendar via a staging calendar-gateway-rs instance.
 [[backends]]
 name = "calendar"
 transport = "http"
@@ -167,6 +234,11 @@ read_only_targets = [
     "get-freebusy",
     "get-current-time",
 ]
+write_targets = [
+    "create-event",
+    "update-event",
+    "delete-event",
+]
 
 [backends.timeout]
 seconds = 30
@@ -174,8 +246,7 @@ seconds = 30
 [backends.concurrency]
 max_concurrent = 4
 
-# Orchestrator: observation only (runners, jobs, missions, alerts, questions).
-# Launching or answering agents stays out of the hub.
+# --- orch: Agent orchestrator via a staging orch-gateway-rs instance. *_wait tools block up to 60 s.
 [[backends]]
 name = "orch"
 transport = "http"
@@ -198,16 +269,43 @@ read_only_targets = [
     "infra_alert_list",
     "infra_alert_get",
 ]
+write_targets = [
+    "agent_job_start",
+    "agent_job_cancel",
+    "agent_mission_create",
+    "agent_mission_retry",
+    "agent_mission_validate",
+    "agent_question_answer",
+]
 
-# The *_wait tools block for up to 60 s.
 [backends.timeout]
 seconds = 75
 
 [backends.concurrency]
 max_concurrent = 4
 
-# Excalidraw: read-only staging instance of the Python gateway
-# (facade-envfile-hub-staging.sh). Drawing (create_view) stays out.
+# --- opus: Astra / Claude Opus via a staging claude-opus-mcp instance. opus_think can take minutes.
+[[backends]]
+name = "opus"
+transport = "http"
+url = "http://127.0.0.1:18976/mcp"
+bearer_token = "${MCP_HUB_OPUS_TOKEN}"
+forward_auth = false
+read_only_targets = [
+    "opus_health",
+]
+write_targets = [
+    "opus_think",
+    "opus_session",
+]
+
+[backends.timeout]
+seconds = 900
+
+[backends.concurrency]
+max_concurrent = 4
+
+# --- excalidraw: Excalidraw via a staging instance of the Python gateway.
 [[backends]]
 name = "excalidraw"
 transport = "http"
@@ -221,9 +319,61 @@ read_only_targets = [
     "library_list",
     "library_load",
 ]
+write_targets = [
+    "create_view",
+    "export_to_excalidraw",
+    "save_checkpoint",
+    "library_mkdir",
+    "library_save",
+    "library_move",
+]
 
 [backends.timeout]
-seconds = 30
+seconds = 60
+
+[backends.concurrency]
+max_concurrent = 4
+
+# --- browser: Remote browser (Brave devtools) via a staging brave-devtools-gateway instance. Every tool is a
+# write: reading pages can exfiltrate data and pages can carry prompt injection.
+[[backends]]
+name = "browser"
+transport = "http"
+url = "http://127.0.0.1:18974/mcp"
+bearer_token = "${MCP_HUB_BROWSER_TOKEN}"
+forward_auth = false
+write_targets = [
+    "click",
+    "close_page",
+    "drag",
+    "emulate",
+    "evaluate_script",
+    "fill",
+    "fill_form",
+    "get_console_message",
+    "get_network_request",
+    "handle_dialog",
+    "hover",
+    "lighthouse_audit",
+    "list_console_messages",
+    "list_network_requests",
+    "list_pages",
+    "navigate_page",
+    "new_page",
+    "performance_analyze_insight",
+    "performance_start_trace",
+    "performance_stop_trace",
+    "press_key",
+    "resize_page",
+    "select_page",
+    "take_screenshot",
+    "take_snapshot",
+    "type_text",
+    "wait_for",
+]
+
+[backends.timeout]
+seconds = 120
 
 [backends.concurrency]
 max_concurrent = 4

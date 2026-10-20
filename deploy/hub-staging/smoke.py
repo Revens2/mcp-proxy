@@ -150,16 +150,19 @@ def main():
 
     names = sorted(t["name"] for t in s.rpc("tools/list", {})["result"]["tools"])
     check("public surface is meta-tools only",
-          names == ["proxy_backend_status", "proxy_call_tool", "proxy_get_tool", "proxy_list_tools", "proxy_search_tools"],
+          names == ["proxy_backend_status", "proxy_call_tool", "proxy_call_write_tool",
+                    "proxy_get_tool", "proxy_list_tools", "proxy_search_tools"],
           str(names))
 
     ids = [r["id"] for r in json.loads(text(s.tool("proxy_search_tools", {"query": "search vault notes"})))]
     check("search finds vault tools", any(i.startswith("vault:") for i in ids), str(ids))
     ids = [r["id"] for r in json.loads(text(s.tool("proxy_search_tools", {"query": "repository file contents"})))]
     check("search finds github tools", any(i.startswith("github:") for i in ids), str(ids))
-    ids = [r["id"] for r in json.loads(text(s.tool("proxy_search_tools", {"query": "delete file merge push"})))]
-    check("search hides write tools",
-          not any(i in ("github:delete_file", "github:merge_pull_request", "github:push_files") for i in ids), str(ids))
+    rows = json.loads(text(s.tool("proxy_search_tools", {"query": "create issue pull request"})))
+    check("search routes writes to proxy_call_write_tool",
+          any(r["call_with"] == "proxy_call_write_tool" for r in rows)
+          and all(r["call_with"] in ("proxy_call_tool", "proxy_call_write_tool") for r in rows),
+          str([(r["id"], r["call_with"]) for r in rows][:6]))
 
     schema = json.loads(text(s.tool("proxy_get_tool", {"tool_id": "vault:read_note"})))
     check("schema retrieval", "path" in json.dumps(schema.get("input_schema", {})))
@@ -168,19 +171,40 @@ def main():
     check("call_tool accepts a discovery id", ok(s.wrapped("vault:context_status", {})))
     check("discovery id cannot reach meta-tools", not ok(s.wrapped("proxy:add_backend", {})))
     check("github read through hub", ok(s.wrapped("github_get_me", {})))
-    for target in ("github_delete_file", "github_create_or_update_file", "github_merge_pull_request",
-                   "vault_append_note", "unknown_tool", "proxy_add_backend"):
+    hub_refusals = ("changes state", "not a write tool", "only callable through",
+                    "require the", "Tool not available", "ordinary target")
+
+    def refusal(result):
+        return json.dumps(result.get("error", {})) + text(result)
+
+    for target in ("github_delete_file", "github_merge_pull_request", "tasks_create"):
+        check(f"write refused via proxy_call_tool: {target}",
+              "changes state" in refusal(s.wrapped(target, {})))
+        check(f"write refused as direct call: {target}",
+              "only callable through" in refusal(s.tool(target, {})))
+    for target in ("vault_append_note", "unknown_tool", "proxy_add_backend"):
         check(f"refused via call_tool: {target}", not ok(s.wrapped(target, {})))
         check(f"refused direct: {target}", not ok(s.tool(target, {})))
+    check("read refused via proxy_call_write_tool",
+          "not a write tool" in refusal(s.tool("proxy_call_write_tool",
+                                               {"name": "github_get_me", "arguments": {}})))
+    # A write with missing arguments: the hub lets it through (route + scope OK)
+    # and the gateway rejects it, so nothing is created.
+    probe = s.tool("proxy_call_write_tool", {"name": "tasks_create", "arguments": {}})
+    check("write reaches the gateway through proxy_call_write_tool",
+          not any(m in refusal(probe) for m in hub_refusals), refusal(probe)[:200])
 
     inventory = json.loads(text(s.tool("proxy_list_tools", {})))
     backends = sorted(b["backend"] for b in inventory["backends"])
     ids = [t["tool_id"] for b in inventory["backends"] for t in b["tools"]]
     check("inventory covers every gateway",
-          backends == ["calendar", "github", "orch", "tasks", "vault"], str(backends))
-    check("inventory hides write tools",
-          not any(i.split(":", 1)[1] in ("delete_file", "push_files", "append_note", "tasks_create")
-                  for i in ids), str(len(ids)))
+          backends == ["browser", "calendar", "excalidraw", "github", "opus", "orch", "tasks", "vault"],
+          str(backends))
+    by_id = {t["tool_id"]: t["call_with"] for b in inventory["backends"] for t in b["tools"]}
+    check("inventory marks writes",
+          by_id.get("tasks:tasks_create") == "proxy_call_write_tool"
+          and by_id.get("tasks:tasks_list") == "proxy_call_tool"
+          and by_id.get("browser:navigate_page") == "proxy_call_write_tool", str(len(ids)))
     print(f"      inventory: {inventory['total_tools']} tools")
 
     status = s.tool("proxy_backend_status", {})

@@ -618,7 +618,10 @@ fn shipped_hub_configs_fail_closed_without_secrets() {
         assert!(config.auth.is_some(), "{path}");
         for backend in &config.backends {
             assert!(!backend.forward_auth, "{path}: {}", backend.name);
-            assert!(!backend.read_only_targets.is_empty(), "{path}");
+            assert!(
+                !backend.read_only_targets.is_empty() || !backend.write_targets.is_empty(),
+                "{path}"
+            );
         }
         // Credentials are environment references only.
         for line in text.lines().filter(|l| {
@@ -688,6 +691,12 @@ async fn hub_routes_writes_only_through_the_write_wrapper() {
     denied(&write_wrapped("staging_read_note").await);
     denied(&write_wrapped("staging_execute").await);
     denied(&write_wrapped("proxy_add_backend").await);
+    // A direct call cannot bypass the destructive wrapper.
+    denied(
+        &session
+            .call("staging_write_note", json!({"text":"x"}))
+            .await,
+    );
     assert!(fixture.calls.lock().unwrap().is_empty());
 
     success(&write_wrapped("staging_write_note").await);
