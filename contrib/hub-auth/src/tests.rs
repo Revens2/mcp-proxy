@@ -359,3 +359,47 @@ async fn write_scope_is_issued_only_when_enabled() {
     assert_eq!(claims["active"], true);
     assert_eq!(claims["scope"], "hub:ecriture hub:lecture");
 }
+
+#[tokio::test]
+async fn consent_passphrase_rotates_without_restart() {
+    let path = std::env::temp_dir().join(format!("hub-auth-consent-{}", std::process::id()));
+    let hash =
+        |phrase: &str| mcp_auth::consent::hash_phrase_with_salt(phrase, b"0123456789abcdef", 1000);
+    std::fs::write(&path, hash(PHRASE)).unwrap();
+    let app = app(settings().with_consent_hash_file(path.to_string_lossy().to_string()));
+
+    // The current phrase works through the whole flow.
+    let token = obtain_token(&app).await;
+    let (_, claims) = introspect_as(&app, &basic(CLIENT, SECRET), &token).await;
+    assert_eq!(claims["active"], true);
+
+    // Rotate the file: the old phrase is refused, the new one accepted, and
+    // the token granted before the rotation stays valid.
+    std::fs::write(&path, hash("another synthetic phrase")).unwrap();
+    let (status, _, _) = send(
+        &app,
+        form(
+            "/consentement",
+            format!(
+                "demande=x&phrase={}",
+                url::form_urlencoded::byte_serialize(PHRASE.as_bytes()).collect::<String>()
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = send(
+        &app,
+        form(
+            "/consentement",
+            "demande=unknown&phrase=another+synthetic+phrase".to_string(),
+        ),
+    )
+    .await;
+    // Accepted by the guard, then refused by mcp-auth only because the
+    // request id is unknown -- not because of the phrase.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, claims) = introspect_as(&app, &basic(CLIENT, SECRET), &token).await;
+    assert_eq!(claims["active"], true);
+    std::fs::remove_file(&path).ok();
+}

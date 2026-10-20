@@ -21,7 +21,7 @@
 //! | `HUB_AUTH_ISSUER` | public HTTPS issuer, e.g. `https://host/oauth/hub-staging` |
 //! | `HUB_AUTH_RESOURCE` | public HTTPS MCP URL, e.g. `https://host/hub-staging/mcp` |
 //! | `HUB_AUTH_PORT` | loopback port (default 18983) |
-//! | `HUB_AUTH_CONSENT_HASH_FILE` | file holding `pbkdf2:...` (see `hash-phrase`) |
+//! | `HUB_AUTH_CONSENT_HASH_FILE` | file holding `pbkdf2:...` (see `hash-phrase`); re-read on every consent, so rotating it needs no restart |
 //! | `HUB_AUTH_INTROSPECTION_CLIENT_ID` | client id used by mcp-proxy |
 //! | `HUB_AUTH_INTROSPECTION_SECRET_FILE` | file holding that client's secret (>= 32 chars) |
 //! | `HUB_AUTH_REDIRECT_PREFIXES` | comma-separated allowed redirect URI prefixes (default `https://chatgpt.com/`) |
@@ -71,6 +71,10 @@ pub struct Settings {
     pub redirect_prefixes: Vec<String>,
     /// Also issue [`HUB_WRITE_SCOPE`]; consent then always covers it.
     pub allow_writes: bool,
+    /// When set, the consent hash is re-read from this file on every consent
+    /// attempt, so the passphrase can be rotated without a restart (which
+    /// would drop every grant held in memory).
+    pub consent_hash_file: Option<String>,
 }
 
 impl Settings {
@@ -88,6 +92,23 @@ impl Settings {
         self.allow_writes = allow_writes;
         self
     }
+
+    /// Re-read the consent hash from `path` on every consent attempt.
+    pub fn with_consent_hash_file(mut self, path: impl Into<String>) -> Self {
+        self.consent_hash_file = Some(path.into());
+        self
+    }
+
+    /// The consent hash in force now (fresh from the file when configured).
+    fn current_consent_hash(&self) -> Option<String> {
+        match &self.consent_hash_file {
+            Some(path) => std::fs::read_to_string(path)
+                .ok()
+                .map(|h| h.trim().to_string())
+                .filter(|h| h.starts_with("pbkdf2:")),
+            None => Some(self.consent_hash.clone()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -95,6 +116,11 @@ struct AppState {
     settings: Arc<Settings>,
     store: Arc<MemoryStore>,
     consent: Arc<Mutex<(Instant, u32)>>,
+    /// Random per-process phrase whose hash `mcp-auth` checks. The guard
+    /// verifies the operator's passphrase against the current hash and only
+    /// then substitutes this value, so rotating the operator passphrase never
+    /// requires rebuilding the `mcp-auth` state.
+    inner_phrase: Arc<String>,
 }
 
 fn https_url(value: &str, name: &str) -> Result<String, String> {
@@ -157,6 +183,7 @@ impl Settings {
             introspection_secret: introspection_secret.to_string(),
             redirect_prefixes,
             allow_writes: false,
+            consent_hash_file: None,
         })
     }
 }
@@ -165,6 +192,7 @@ impl Settings {
 pub fn app(settings: Settings) -> Router {
     let settings = Arc::new(settings);
     let store = Arc::new(MemoryStore::default());
+    let inner_phrase = Arc::new(mcp_auth::oauth::new_opaque_token());
     let oauth = OAuthState {
         config: Arc::new(OAuthConfig {
             issuer: settings.issuer.clone(),
@@ -178,7 +206,11 @@ pub fn app(settings: Settings) -> Router {
             valid_scopes: settings.scopes(),
             // The single consent covers every scope the hub issues.
             extra_submit_scopes: settings.scopes(),
-            consent_hash: settings.consent_hash.clone(),
+            consent_hash: mcp_auth::consent::hash_phrase_with_salt(
+                &inner_phrase,
+                mcp_auth::oauth::new_opaque_token().as_bytes(),
+                1_000,
+            ),
             static_client_id: "hub-auth".to_string(),
         }),
         store: Arc::clone(&store),
@@ -187,6 +219,7 @@ pub fn app(settings: Settings) -> Router {
         settings: Arc::clone(&settings),
         store,
         consent: Arc::new(Mutex::new((Instant::now(), 0))),
+        inner_phrase,
     };
 
     // RFC 8414 path-aware location of the metadata for an issuer with a path.
@@ -289,7 +322,35 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
                 }
                 window.1 += 1;
             }
-            let response = next.run(request).await;
+            let (parts, body) = request.into_parts();
+            let Ok(bytes) = to_bytes(body, MAX_BODY_BYTES).await else {
+                return reject(StatusCode::PAYLOAD_TOO_LARGE, "body too large");
+            };
+            let fields: Vec<(String, String)> =
+                url::form_urlencoded::parse(&bytes).into_owned().collect();
+            let field = |key: &str| {
+                fields
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.as_str())
+            };
+            let accepted = match (state.settings.current_consent_hash(), field("phrase")) {
+                (Some(hash), Some(phrase)) => mcp_auth::consent::verify_phrase(phrase, &hash),
+                _ => false,
+            };
+            if !accepted {
+                tracing::info!(status = 403, "consent submitted");
+                return reject(StatusCode::FORBIDDEN, "Phrase de passe refusee.");
+            }
+            let forwarded: String = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("demande", field("demande").unwrap_or_default())
+                .append_pair("phrase", &state.inner_phrase)
+                .finish();
+            let mut parts = parts;
+            parts.headers.remove(header::CONTENT_LENGTH);
+            let response = next
+                .run(Request::from_parts(parts, Body::from(forwarded)))
+                .await;
             tracing::info!(status = response.status().as_u16(), "consent submitted");
             response
         }
@@ -425,6 +486,10 @@ fn settings_from_env() -> Result<Settings, String> {
             .unwrap_or_else(|_| "https://chatgpt.com/".to_string()),
     )
     .map(|s| s.with_writes(std::env::var("HUB_AUTH_ALLOW_WRITES").as_deref() == Ok("1")))
+    .map(|s| match std::env::var("HUB_AUTH_CONSENT_HASH_FILE") {
+        Ok(path) => s.with_consent_hash_file(path),
+        Err(_) => s,
+    })
 }
 
 async fn hash_phrase_command() -> Result<(), String> {
