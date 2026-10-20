@@ -113,7 +113,15 @@ pub(crate) async fn register_admin_tools_with_policy(
 
     let state_connections = state.reload_policy.connections().clone();
     let public_status = config.security.default_deny;
-    let router = build_admin_router(state, discovery_tools, search_mode, public_status, skills);
+    let writes = search_mode && config.security.allow_writes;
+    let router = build_admin_router(
+        state,
+        discovery_tools,
+        search_mode,
+        public_status,
+        writes,
+        skills,
+    );
     let transport = ChannelTransport::new(router);
 
     proxy
@@ -126,6 +134,7 @@ fn build_admin_router(
     discovery_tools: Option<Vec<tower_mcp::Tool>>,
     search_mode: bool,
     public_status: bool,
+    writes: bool,
     skills: Vec<tower_mcp::Prompt>,
 ) -> McpRouter {
     let state_for_backends = state.clone();
@@ -262,11 +271,21 @@ fn build_admin_router(
         .tool(config_tool);
 
     if search_mode {
-        let call_tool = ToolBuilder::new("call_tool")
-            .description(
-                "Invoke a public tool by name with the same caller permissions and argument \
-                 transformations as a direct call. Use proxy/search_tools to discover tools.",
-            )
+        let call_tool = ToolBuilder::new("call_tool").description(if writes {
+            "Invoke a read-only public tool by name with the same caller permissions and \
+             argument transformations as a direct call. Use proxy/search_tools to discover \
+             tools; tools that change state must go through proxy/call_write_tool."
+        } else {
+            "Invoke a public tool by name with the same caller permissions and argument \
+             transformations as a direct call. Use proxy/search_tools to discover tools."
+        });
+        // With a write wrapper, this one only reaches read-only targets.
+        let call_tool = if writes {
+            call_tool.read_only()
+        } else {
+            call_tool
+        };
+        let call_tool = call_tool
             // The configured service resolves this tool before backend dispatch.
             // Raw McpProxy users must not regain the former policy bypass.
             .handler(|_: CallToolInput| async {
@@ -276,6 +295,24 @@ fn build_admin_router(
             })
             .build();
         router = router.tool(call_tool);
+    }
+
+    if writes {
+        let call_write_tool = ToolBuilder::new("call_write_tool")
+            .description(
+                "Invoke a tool that changes state or acts on the user's behalf (create, \
+                 update, send, navigate, run). Pass the tool name and its arguments; only \
+                 tools listed as writes are accepted. Confirm with the user before calling.",
+            )
+            .destructive()
+            // Resolved by the configured invocation service, like call_tool.
+            .handler(|_: CallToolInput| async {
+                Err(tower_mcp::Error::invalid_params(
+                    "proxy/call_write_tool requires the configured invocation service",
+                ))
+            })
+            .build();
+        router = router.tool(call_write_tool);
     }
 
     if public_status {
@@ -444,7 +481,7 @@ mod tests {
             reload_policy: test_policy(),
         };
 
-        let router = build_admin_router(state, None, false, false, vec![]);
+        let router = build_admin_router(state, None, false, false, false, vec![]);
         let transport = ChannelTransport::new(router);
 
         let mut test_proxy = McpProxy::builder("verify", "1.0.0")
@@ -475,7 +512,7 @@ mod tests {
             reload_policy: test_policy(),
         };
 
-        let router = build_admin_router(state, None, true, false, vec![]);
+        let router = build_admin_router(state, None, true, false, false, vec![]);
         let transport = ChannelTransport::new(router);
 
         let mut test_proxy = McpProxy::builder("verify", "1.0.0")
@@ -529,7 +566,7 @@ mod tests {
             )
             .build();
 
-        let router = build_admin_router(state, Some(vec![extra_tool]), false, false, vec![]);
+        let router = build_admin_router(state, Some(vec![extra_tool]), false, false, false, vec![]);
         let transport = ChannelTransport::new(router);
 
         let mut test_proxy = McpProxy::builder("verify", "1.0.0")
@@ -558,7 +595,7 @@ mod tests {
             reload_policy: test_policy(),
         };
 
-        let router = build_admin_router(state, None, false, false, vec![]);
+        let router = build_admin_router(state, None, false, false, false, vec![]);
         let transport = ChannelTransport::new(router);
 
         let mut test_proxy = McpProxy::builder("verify", "1.0.0")

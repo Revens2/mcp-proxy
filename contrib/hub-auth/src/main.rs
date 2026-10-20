@@ -25,6 +25,7 @@
 //! | `HUB_AUTH_INTROSPECTION_CLIENT_ID` | client id used by mcp-proxy |
 //! | `HUB_AUTH_INTROSPECTION_SECRET_FILE` | file holding that client's secret (>= 32 chars) |
 //! | `HUB_AUTH_REDIRECT_PREFIXES` | comma-separated allowed redirect URI prefixes (default `https://chatgpt.com/`) |
+//! | `HUB_AUTH_ALLOW_WRITES` | `1` also issues `hub:ecriture` (required by `proxy/call_write_tool`) |
 //!
 //! `hub-auth hash-phrase` reads a passphrase on stdin and prints its hash.
 //!
@@ -48,8 +49,11 @@ use mcp_auth::oauth::{auth_router, MemoryStore, OAuthConfig, OAuthState};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-/// The only scope this hub issues: discovery and read-only invocation.
+/// Scope for discovery and read-only invocation (always issued).
 pub const HUB_SCOPE: &str = "hub:lecture";
+/// Scope mcp-proxy requires for `proxy/call_write_tool` (only issued when
+/// `HUB_AUTH_ALLOW_WRITES=1`).
+pub const HUB_WRITE_SCOPE: &str = "hub:ecriture";
 const DEFAULT_PORT: u16 = 18983;
 const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Consent passphrase attempts accepted per window, for all clients together.
@@ -65,6 +69,25 @@ pub struct Settings {
     pub introspection_client_id: String,
     pub introspection_secret: String,
     pub redirect_prefixes: Vec<String>,
+    /// Also issue [`HUB_WRITE_SCOPE`]; consent then always covers it.
+    pub allow_writes: bool,
+}
+
+impl Settings {
+    /// Scopes this server registers, requests consent for, and introspects.
+    pub fn scopes(&self) -> Vec<String> {
+        let mut scopes = vec![HUB_SCOPE.to_string()];
+        if self.allow_writes {
+            scopes.push(HUB_WRITE_SCOPE.to_string());
+        }
+        scopes
+    }
+
+    /// Enable or disable the write scope.
+    pub fn with_writes(mut self, allow_writes: bool) -> Self {
+        self.allow_writes = allow_writes;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -133,6 +156,7 @@ impl Settings {
             introspection_client_id: introspection_client_id.to_string(),
             introspection_secret: introspection_secret.to_string(),
             redirect_prefixes,
+            allow_writes: false,
         })
     }
 }
@@ -145,10 +169,15 @@ pub fn app(settings: Settings) -> Router {
         config: Arc::new(OAuthConfig {
             issuer: settings.issuer.clone(),
             resource_url: settings.resource.clone(),
-            resource_name: "MCP hub (read-only)".to_string(),
+            resource_name: if settings.allow_writes {
+                "MCP hub".to_string()
+            } else {
+                "MCP hub (read-only)".to_string()
+            },
             default_scope: HUB_SCOPE.to_string(),
-            valid_scopes: vec![HUB_SCOPE.to_string()],
-            extra_submit_scopes: Vec::new(),
+            valid_scopes: settings.scopes(),
+            // The single consent covers every scope the hub issues.
+            extra_submit_scopes: settings.scopes(),
             consent_hash: settings.consent_hash.clone(),
             static_client_id: "hub-auth".to_string(),
         }),
@@ -223,7 +252,11 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
             {
                 return reject(StatusCode::BAD_REQUEST, "unknown resource");
             }
-            if value("scope").is_some_and(|s| s.split_whitespace().any(|s| s != HUB_SCOPE)) {
+            let scopes = state.settings.scopes();
+            if value("scope").is_some_and(|s| {
+                s.split_whitespace()
+                    .any(|s| !scopes.iter().any(|known| known == s))
+            }) {
                 return reject(StatusCode::BAD_REQUEST, "unknown scope");
             }
             next.run(request).await
@@ -344,21 +377,28 @@ async fn introspect(
     let Some(entry) = state.store.get_access(&form.token).await else {
         return inactive();
     };
-    let scopes: HashSet<&str> = entry
+    // Report only scopes this server currently issues: turning writes off
+    // drops hub:ecriture from existing tokens immediately.
+    let issued = state.settings.scopes();
+    let scopes: Vec<&str> = entry
         .scopes
         .iter()
         .map(String::as_str)
-        .filter(|s| *s == HUB_SCOPE)
+        .filter(|s| issued.iter().any(|known| known == s))
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect();
-    if scopes.is_empty() {
+    if !scopes.contains(&HUB_SCOPE) {
         return inactive();
     }
+    let mut scopes = scopes;
+    scopes.sort_unstable();
     Json(serde_json::json!({
         "active": true,
         "token_type": "Bearer",
         "client_id": entry.client_id,
         "sub": entry.client_id,
-        "scope": HUB_SCOPE,
+        "scope": scopes.join(" "),
         "iss": state.settings.issuer,
         "aud": state.settings.resource,
         "exp": entry.expires_at,
@@ -384,6 +424,7 @@ fn settings_from_env() -> Result<Settings, String> {
         &std::env::var("HUB_AUTH_REDIRECT_PREFIXES")
             .unwrap_or_else(|_| "https://chatgpt.com/".to_string()),
     )
+    .map(|s| s.with_writes(std::env::var("HUB_AUTH_ALLOW_WRITES").as_deref() == Ok("1")))
 }
 
 async fn hash_phrase_command() -> Result<(), String> {

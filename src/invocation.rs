@@ -19,19 +19,43 @@ pub(crate) struct SearchInvocation<S> {
     prefix: String,
     separator: String,
     wrapper: String,
+    write_wrapper: String,
+    writes: Option<crate::filter::WritePolicy>,
 }
 
 impl<S> SearchInvocation<S> {
     pub(crate) fn new(inner: S, separator: &str) -> Self {
         let prefix = format!("proxy{separator}");
         let wrapper = format!("{prefix}call_tool");
+        let write_wrapper = format!("{prefix}call_write_tool");
         Self {
             inner,
             prefix,
             separator: separator.to_string(),
             wrapper,
+            write_wrapper,
+            writes: None,
         }
     }
+
+    /// Route write targets only through `call_write_tool`, and reads only
+    /// through `call_tool`.
+    pub(crate) fn with_writes(mut self, writes: crate::filter::WritePolicy) -> Self {
+        self.writes = Some(writes);
+        self
+    }
+}
+
+fn refuse(
+    id: tower_mcp::RequestId,
+    message: String,
+) -> Pin<Box<dyn Future<Output = Result<RouterResponse, Infallible>> + Send>> {
+    Box::pin(async move {
+        Ok(RouterResponse {
+            id,
+            inner: Err(JsonRpcError::invalid_params(message)),
+        })
+    })
 }
 
 fn normalize_target_name(name: &str, separator: &str) -> String {
@@ -61,40 +85,65 @@ where
     }
 
     fn call(&mut self, mut req: RouterRequest) -> Self::Future {
-        if let McpRequest::CallTool(params) = &mut req.inner
-            && params.name == self.wrapper
-        {
-            let input = serde_json::from_value::<crate::admin_tools::CallToolInput>(
-                params.arguments.clone(),
-            );
-            let input = match input {
-                Ok(input) => input,
-                Err(_) => {
-                    return Box::pin(async move {
-                        Ok(RouterResponse {
-                            id: req.id,
-                            inner: Err(JsonRpcError::invalid_params(
-                                "proxy/call_tool requires an ordinary target name and object arguments",
-                            )),
-                        })
-                    });
-                }
-            };
-            let target = normalize_target_name(&input.name, &self.separator);
-            if target.is_empty() || target.starts_with(&self.prefix) {
-                let message = format!(
-                    "{} requires an ordinary target name and object arguments",
-                    self.wrapper
+        if let McpRequest::CallTool(params) = &mut req.inner {
+            let is_write_wrapper = self.writes.is_some() && params.name == self.write_wrapper;
+            if params.name == self.wrapper || is_write_wrapper {
+                let wrapper = params.name.clone();
+                let input = serde_json::from_value::<crate::admin_tools::CallToolInput>(
+                    params.arguments.clone(),
                 );
-                return Box::pin(async move {
-                    Ok(RouterResponse {
-                        id: req.id,
-                        inner: Err(JsonRpcError::invalid_params(message)),
-                    })
-                });
+                let Ok(input) = input else {
+                    return refuse(
+                        req.id,
+                        format!("{wrapper} requires an ordinary target name and object arguments"),
+                    );
+                };
+                let target = normalize_target_name(&input.name, &self.separator);
+                if target.is_empty() || target.starts_with(&self.prefix) {
+                    return refuse(
+                        req.id,
+                        format!("{wrapper} requires an ordinary target name and object arguments"),
+                    );
+                }
+                if let Some(writes) = &self.writes {
+                    let is_write = writes.is_write(&target);
+                    if is_write && !is_write_wrapper {
+                        return refuse(
+                            req.id,
+                            format!(
+                                "{target} changes state: call it with {} instead",
+                                self.write_wrapper
+                            ),
+                        );
+                    }
+                    if !is_write && is_write_wrapper {
+                        return refuse(
+                            req.id,
+                            format!(
+                                "{target} is not a write tool: call it with {}",
+                                self.wrapper
+                            ),
+                        );
+                    }
+                    if is_write {
+                        // Audit the real target and argument names, never values.
+                        let mut keys: Vec<&str> = input
+                            .arguments
+                            .as_ref()
+                            .map(|a| a.keys().map(String::as_str).collect())
+                            .unwrap_or_default();
+                        keys.sort_unstable();
+                        tracing::info!(
+                            target: "mcp_proxy::write_audit",
+                            tool = %target,
+                            argument_names = ?keys,
+                            "write tool invoked"
+                        );
+                    }
+                }
+                params.name = target;
+                params.arguments = input.arguments.unwrap_or_default().into();
             }
-            params.name = target;
-            params.arguments = input.arguments.unwrap_or_default().into();
         }
         Box::pin(self.inner.call(req))
     }

@@ -490,6 +490,13 @@ pub struct BackendConfig {
     /// `expose_tools`, `hide_tools`, `hide_destructive`, or `read_only_only`.
     #[serde(default)]
     pub read_only_targets: Vec<String>,
+    /// Exact backend-local names of tools that change state or act on the
+    /// caller's behalf. Only valid with `security.default_deny` and
+    /// `security.allow_writes`. They are callable only through
+    /// `proxy/call_write_tool` and, when `security.write_scope` is set, only
+    /// with a token carrying that scope. Disjoint from `read_only_targets`.
+    #[serde(default)]
+    pub write_targets: Vec<String>,
     /// Failover: name of the primary backend this is a failover for.
     /// When set, this backend's tools are hidden and requests are only
     /// routed here when the primary returns an error.
@@ -974,6 +981,17 @@ pub struct SecurityConfig {
     /// that cannot collide once namespaced.
     #[serde(default)]
     pub default_deny: bool,
+    /// Allow backends to declare `write_targets` (requires `default_deny`
+    /// and search exposure). Writes go through a separate meta-tool,
+    /// `proxy/call_write_tool`, annotated as destructive so clients can ask
+    /// for confirmation; `proxy/call_tool` stays read-only.
+    #[serde(default)]
+    pub allow_writes: bool,
+    /// Token scope every write requires (e.g. `hub:ecriture`). Required with
+    /// `allow_writes` when inbound auth is JWT or OAuth; removing the scope
+    /// from the authorization server disables all writes without a restart.
+    #[serde(default)]
+    pub write_scope: Option<String>,
 }
 
 /// Logging, metrics, and distributed tracing configuration.
@@ -1337,8 +1355,20 @@ impl BackendConfig {
                 );
             }
         }
+        if let Some(both) = self
+            .write_targets
+            .iter()
+            .find(|name| self.read_only_targets.contains(name))
+        {
+            anyhow::bail!(
+                "backend '{}': {:?} cannot be both a read_only_target and a write_target",
+                self.name,
+                both
+            );
+        }
         for (field, names) in [
             ("read_only_targets", &self.read_only_targets),
+            ("write_targets", &self.write_targets),
             ("expose_resources", &self.expose_resources),
             ("expose_prompts", &self.expose_prompts),
         ] {
@@ -1377,13 +1407,20 @@ impl BackendConfig {
             }));
         }
 
-        if !self.read_only_targets.is_empty() {
+        if !self.read_only_targets.is_empty() || !self.write_targets.is_empty() {
             self.check_read_only_targets()?;
             // The allowlist is the whole capability surface of the backend:
             // resources and prompts are denied unless they are listed exactly.
+            // Write targets are callable here too; which wrapper and scope a
+            // write needs is enforced by `WritePolicy`.
             return Ok(Some(BackendFilter {
                 namespace: format!("{}{}", self.name, separator),
-                tool_filter: NameFilter::allow_list(self.read_only_targets.iter().cloned())?,
+                tool_filter: NameFilter::allow_list(
+                    self.read_only_targets
+                        .iter()
+                        .chain(&self.write_targets)
+                        .cloned(),
+                )?,
                 resource_filter: NameFilter::allow_list(self.expose_resources.iter().cloned())?,
                 prompt_filter: NameFilter::allow_list(self.expose_prompts.iter().cloned())?,
                 hide_destructive: false,
@@ -1505,6 +1542,19 @@ pub(crate) fn validate_rbac(
 }
 
 impl ProxyConfig {
+    /// Public (namespaced) names of every configured write target.
+    pub fn write_tool_names(&self) -> HashSet<String> {
+        let separator = &self.proxy.separator;
+        self.backends
+            .iter()
+            .flat_map(|b| {
+                b.write_targets
+                    .iter()
+                    .map(move |t| format!("{}{separator}{t}", b.name))
+            })
+            .collect()
+    }
+
     // Parser errors can include entire source lines or rejected string values.
     // Keep positions, but never retain the original error in the anyhow chain.
     fn deserialize_toml(input: &str) -> Result<Self> {
@@ -1720,6 +1770,24 @@ impl ProxyConfig {
         if !self.composite_tools.is_empty() {
             anyhow::bail!("security.default_deny does not support composite_tools");
         }
+        if self.security.allow_writes {
+            if self.proxy.tool_exposure != ToolExposure::Search {
+                anyhow::bail!("security.allow_writes requires tool_exposure = \"search\"");
+            }
+            let identity_auth = matches!(
+                &self.auth,
+                Some(AuthConfig::Jwt { .. }) | Some(AuthConfig::OAuth { .. })
+            );
+            match self.security.write_scope.as_deref() {
+                Some(scope) if scope.trim().is_empty() || scope.contains(char::is_whitespace) => {
+                    anyhow::bail!("security.write_scope must be a single scope token")
+                }
+                None if identity_auth => anyhow::bail!(
+                    "security.allow_writes with JWT/OAuth requires security.write_scope"
+                ),
+                _ => {}
+            }
+        }
         for backend in &self.backends {
             let name = &backend.name;
             if !is_client_safe_name(name) || name.contains(separator.as_str()) {
@@ -1742,14 +1810,21 @@ impl ProxyConfig {
                     );
                 }
             }
-            if backend.read_only_targets.is_empty() {
+            if backend.read_only_targets.is_empty() && backend.write_targets.is_empty() {
                 anyhow::bail!(
                     "backend '{name}': security.default_deny requires an explicit read_only_targets allowlist"
                 );
             }
+            if !backend.write_targets.is_empty() && !self.security.allow_writes {
+                anyhow::bail!("backend '{name}': write_targets require security.allow_writes");
+            }
             // Report pattern syntax before the client-name grammar below.
             backend.check_read_only_targets()?;
-            for target in &backend.read_only_targets {
+            for target in backend
+                .read_only_targets
+                .iter()
+                .chain(&backend.write_targets)
+            {
                 let public = format!("{name}{separator}{target}");
                 if !is_client_safe_name(&public) {
                     anyhow::bail!(
@@ -1900,6 +1975,20 @@ impl ProxyConfig {
             );
         }
 
+        if self.security.allow_writes && !self.security.default_deny {
+            anyhow::bail!("security.allow_writes requires security.default_deny");
+        }
+        if let Some(backend) = self
+            .backends
+            .iter()
+            .find(|b| !b.write_targets.is_empty() && !self.security.default_deny)
+        {
+            anyhow::bail!(
+                "backend '{}': write_targets require security.default_deny and security.allow_writes",
+                backend.name
+            );
+        }
+
         if self.security.require_auth_outside_loopback
             && self.auth.is_none()
             && !is_loopback_host(&self.proxy.listen.host)
@@ -1923,7 +2012,7 @@ impl ProxyConfig {
         }
 
         for backend in &self.backends {
-            if !backend.read_only_targets.is_empty() {
+            if !backend.read_only_targets.is_empty() || !backend.write_targets.is_empty() {
                 backend.check_read_only_targets()?;
             }
             if !backend.headers.is_empty() && matches!(backend.transport, TransportType::Stdio) {

@@ -164,14 +164,20 @@ impl Proxy {
                 discovery_visibility.as_ref(),
             )
             .await;
-            let mut tools = crate::discovery::build_discovery_tools_with_schemas(
+            let writes = crate::filter::WritePolicy::from_config(&config);
+            let mut tools = crate::discovery::build_discovery_tools_with_access(
                 index.clone(),
                 schemas.clone(),
                 &config.proxy.separator,
+                writes.clone(),
             );
             // Fail-closed gateways give ordinary callers the full (filtered) inventory.
             if config.security.default_deny {
-                tools.push(crate::discovery::build_inventory_tool(schemas.clone()));
+                tools.push(crate::discovery::build_inventory_tool(
+                    schemas.clone(),
+                    &config.proxy.separator,
+                    writes,
+                ));
             }
             (Some(index), Some(schemas), Some(tools))
         } else {
@@ -1076,11 +1082,15 @@ fn build_middleware_stack(
             backends = filters.len(),
             "Fail-closed capability filtering (security.default_deny)"
         );
-        service = BoxCloneService::new(CapabilityFilterService::with_default_deny(
-            service,
-            filters,
-            meta_prefix,
-        ));
+        let mut filter = CapabilityFilterService::with_default_deny(service, filters, meta_prefix);
+        if let Some(writes) = crate::filter::WritePolicy::from_config(config) {
+            tracing::info!(
+                write_scope = ?writes.scope(),
+                "Write targets enabled (security.allow_writes)"
+            );
+            filter = filter.with_writes(writes);
+        }
+        service = BoxCloneService::new(filter);
     } else if !filters.is_empty() {
         for f in &filters {
             tracing::info!(
@@ -1141,10 +1151,12 @@ fn build_middleware_stack(
 
     // Resolve the search wrapper before the ordinary target's policy stack.
     if config.proxy.tool_exposure == crate::config::ToolExposure::Search {
-        service = BoxCloneService::new(crate::invocation::SearchInvocation::new(
-            service,
-            &config.proxy.separator,
-        ));
+        let mut invocation =
+            crate::invocation::SearchInvocation::new(service, &config.proxy.separator);
+        if let Some(writes) = crate::filter::WritePolicy::from_config(config) {
+            invocation = invocation.with_writes(writes);
+        }
+        service = BoxCloneService::new(invocation);
     }
 
     // Select authority before shared observability and the global rate limit,

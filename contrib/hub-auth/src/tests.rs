@@ -332,3 +332,30 @@ fn settings_reject_weak_or_insecure_values() {
     .is_err());
     assert!(Settings::new(ISSUER, RESOURCE, hash, "", SECRET, "https://chatgpt.com/").is_err());
 }
+
+#[tokio::test]
+async fn write_scope_is_issued_only_when_enabled() {
+    // Read-only server: hub:ecriture is unknown at authorize time.
+    let app_ro = app(settings());
+    let (_, body) = register(&app_ro, REDIRECT).await;
+    let client_id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["client_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let wide = authorize_uri(&client_id, "").replace(
+        &format!("scope={HUB_SCOPE}"),
+        "scope=hub%3Alecture+hub%3Aecriture",
+    ) + &format!("&code_challenge={CHALLENGE}&code_challenge_method=S256");
+    let (status, _, _) = send(&app_ro, HttpRequest::get(wide).body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let token = obtain_token(&app_ro).await;
+    let (_, claims) = introspect_as(&app_ro, &basic(CLIENT, SECRET), &token).await;
+    assert_eq!(claims["scope"], HUB_SCOPE);
+
+    // Write-enabled server: one consent grants both scopes.
+    let app_rw = app(settings().with_writes(true));
+    let token = obtain_token(&app_rw).await;
+    let (_, claims) = introspect_as(&app_rw, &basic(CLIENT, SECRET), &token).await;
+    assert_eq!(claims["active"], true);
+    assert_eq!(claims["scope"], "hub:ecriture hub:lecture");
+}

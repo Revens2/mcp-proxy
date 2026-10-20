@@ -155,6 +155,8 @@ pub struct CapabilityFilterService<S> {
     /// `Some(meta prefix)` enables fail-closed mode: anything outside a
     /// configured filter, other than the gateway meta-tools, is denied.
     default_deny: Option<Arc<str>>,
+    /// Write targets and the scope they require.
+    writes: Option<WritePolicy>,
 }
 
 impl<S> CapabilityFilterService<S> {
@@ -164,7 +166,15 @@ impl<S> CapabilityFilterService<S> {
             inner,
             filters: Arc::new(filters),
             default_deny: None,
+            writes: None,
         }
+    }
+
+    /// Require the write scope (if any) on every call to a write target,
+    /// evaluated on the real target after any wrapper rewrite.
+    pub fn with_writes(mut self, writes: WritePolicy) -> Self {
+        self.writes = Some(writes);
+        self
     }
 
     /// Create a fail-closed filter (`security.default_deny`).
@@ -183,7 +193,66 @@ impl<S> CapabilityFilterService<S> {
             inner,
             filters: Arc::new(filters),
             default_deny: Some(Arc::from(meta_prefix.into())),
+            writes: None,
         }
+    }
+}
+
+/// Which public tool names are writes, and the token scope they require.
+///
+/// Built from `write_targets` when `security.allow_writes` is on. The
+/// capability filter uses it to require the scope on the real target, the
+/// search invocation to route writes only through `proxy/call_write_tool`,
+/// and discovery to tell clients which wrapper to use.
+#[derive(Clone, Debug, Default)]
+pub struct WritePolicy {
+    names: Arc<std::collections::HashSet<String>>,
+    scope: Option<Arc<str>>,
+}
+
+impl WritePolicy {
+    /// Policy for the given public write names and required scope.
+    pub fn new(names: std::collections::HashSet<String>, scope: Option<String>) -> Self {
+        Self {
+            names: Arc::new(names),
+            scope: scope.map(Arc::from),
+        }
+    }
+
+    /// The configured write policy, if `security.allow_writes` is on.
+    pub fn from_config(config: &crate::config::ProxyConfig) -> Option<Self> {
+        config.security.allow_writes.then(|| {
+            Self::new(
+                config.write_tool_names(),
+                config.security.write_scope.clone(),
+            )
+        })
+    }
+
+    /// Whether a public tool name is a write target.
+    pub fn is_write(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+
+    /// The scope a write requires, if any.
+    pub fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
+    }
+
+    /// Reason a write is refused for these request extensions, if any.
+    fn missing_scope(&self, extensions: &tower_mcp::router::Extensions) -> Option<String> {
+        let scope = self.scope.as_deref()?;
+        #[cfg(feature = "oauth")]
+        let granted = extensions
+            .get::<tower_mcp::oauth::token::TokenClaims>()
+            .is_some_and(|claims| claims.has_scope(scope));
+        // Without the OAuth runtime there are no verified claims: fail closed.
+        #[cfg(not(feature = "oauth"))]
+        let granted = {
+            let _ = extensions;
+            false
+        };
+        (!granted).then(|| format!("Write tools require the '{scope}' scope"))
     }
 }
 
@@ -251,7 +320,13 @@ where
 
         // Check if this is a call/read/get for a filtered capability
         let denied = match &req.inner {
-            McpRequest::CallTool(params) => check_tool_denied(&filters, meta, &params.name),
+            McpRequest::CallTool(params) => check_tool_denied(&filters, meta, &params.name)
+                .or_else(|| {
+                    self.writes
+                        .as_ref()
+                        .filter(|writes| writes.is_write(&params.name))
+                        .and_then(|writes| writes.missing_scope(&req.extensions))
+                }),
             McpRequest::ReadResource(params) => check_resource_denied(&filters, meta, &params.uri),
             McpRequest::GetPrompt(params) => check_prompt_denied(&filters, meta, &params.name),
             McpRequest::Complete(_)
@@ -814,5 +889,45 @@ mod tests {
             }
             other => panic!("expected ListTools, got: {:?}", other),
         }
+    }
+
+    #[cfg(feature = "oauth")]
+    #[test]
+    fn write_policy_requires_the_scope_on_verified_claims() {
+        use super::WritePolicy;
+        use tower_mcp::oauth::token::TokenClaims;
+        use tower_mcp::router::Extensions;
+
+        let policy = WritePolicy::new(
+            ["notes_append".to_string()].into(),
+            Some("hub:ecriture".to_string()),
+        );
+        assert!(policy.is_write("notes_append"));
+        assert!(!policy.is_write("notes_read"));
+
+        let with_scope = |scope: Option<&str>| {
+            let mut extensions = Extensions::new();
+            if let Some(scope) = scope {
+                let claims: TokenClaims =
+                    serde_json::from_value(serde_json::json!({ "scope": scope })).unwrap();
+                extensions.insert(claims);
+            }
+            extensions
+        };
+        assert!(policy.missing_scope(&with_scope(None)).is_some());
+        assert!(
+            policy
+                .missing_scope(&with_scope(Some("hub:lecture")))
+                .is_some()
+        );
+        assert!(
+            policy
+                .missing_scope(&with_scope(Some("hub:lecture hub:ecriture")))
+                .is_none()
+        );
+
+        // Without a configured scope, routing alone governs writes.
+        let open = WritePolicy::new(["notes_append".to_string()].into(), None);
+        assert!(open.missing_scope(&with_scope(None)).is_none());
     }
 }

@@ -357,10 +357,24 @@ fn default_similar_k() -> usize {
     5
 }
 
+/// The meta-tool that accepts `call_name`: writes need `call_write_tool`.
+fn call_wrapper(
+    call_name: &str,
+    separator: &str,
+    writes: Option<&crate::filter::WritePolicy>,
+) -> String {
+    if writes.is_some_and(|w| w.is_write(call_name)) {
+        format!("proxy{separator}call_write_tool")
+    } else {
+        format!("proxy{separator}call_tool")
+    }
+}
+
 #[derive(Serialize)]
 struct SearchResultEntry {
     id: String,
     call_name: String,
+    call_with: String,
     server: String,
     name: String,
     description: Option<String>,
@@ -370,14 +384,20 @@ struct SearchResultEntry {
 }
 
 impl SearchResultEntry {
-    fn from_query(r: ToolQueryResult, separator: &str) -> Self {
+    fn from_query(
+        r: ToolQueryResult,
+        separator: &str,
+        writes: Option<&crate::filter::WritePolicy>,
+    ) -> Self {
         let call_name = match r.id.split_once(':') {
             Some((namespace, _)) if namespace != "default" => r.id.replace(':', separator),
             _ => r.tool.name.clone(),
         };
+        let call_with = call_wrapper(&call_name, separator, writes);
         Self {
             id: r.id,
             call_name,
+            call_with,
             server: r.server,
             name: r.tool.name,
             description: r.tool.description,
@@ -419,7 +439,12 @@ impl SchemaStore {
 /// The schema store only holds tools the capability filter allows when it is
 /// built with a [`crate::filter::ToolVisibility`], so the inventory never
 /// reveals a refused tool. Intended for `security.default_deny` gateways.
-pub fn build_inventory_tool(schemas: SchemaStore) -> tower_mcp::Tool {
+pub fn build_inventory_tool(
+    schemas: SchemaStore,
+    separator: &str,
+    writes: Option<crate::filter::WritePolicy>,
+) -> tower_mcp::Tool {
+    let separator = separator.to_string();
     ToolBuilder::new("list_tools")
         .description(
             "List every callable tool, grouped by backend, with its tool_id and a short \
@@ -428,6 +453,8 @@ pub fn build_inventory_tool(schemas: SchemaStore) -> tower_mcp::Tool {
         .read_only()
         .handler(move |_: NoParams| {
             let schemas = schemas.clone();
+            let separator = separator.clone();
+            let writes = writes.clone();
             async move {
                 let store = schemas.0.read().await;
                 let mut by_backend: std::collections::BTreeMap<&str, Vec<InventoryEntry>> =
@@ -445,6 +472,7 @@ pub fn build_inventory_tool(schemas: SchemaStore) -> tower_mcp::Tool {
                     by_backend.entry(backend).or_default().push(InventoryEntry {
                         tool_id: id.clone(),
                         name: tool.name.clone(),
+                        call_with: call_wrapper(&tool.name, &separator, writes.as_ref()),
                         description,
                     });
                 }
@@ -475,6 +503,7 @@ pub fn build_inventory_tool(schemas: SchemaStore) -> tower_mcp::Tool {
 struct InventoryEntry {
     tool_id: String,
     name: String,
+    call_with: String,
     description: String,
 }
 
@@ -512,10 +541,22 @@ pub fn build_discovery_tools_with_schemas(
     schemas: SchemaStore,
     separator: &str,
 ) -> Vec<tower_mcp::Tool> {
+    build_discovery_tools_with_access(index, schemas, separator, None)
+}
+
+/// Like [`build_discovery_tools_with_schemas`], also telling clients which
+/// meta-tool (`call_tool` or `call_write_tool`) accepts each result.
+pub fn build_discovery_tools_with_access(
+    index: SharedDiscoveryIndex,
+    schemas: SchemaStore,
+    separator: &str,
+    writes: Option<crate::filter::WritePolicy>,
+) -> Vec<tower_mcp::Tool> {
     let separator = separator.to_string();
     let call_tool_name = format!("proxy{separator}call_tool");
     let index_for_search = Arc::clone(&index);
     let search_separator = separator.clone();
+    let search_writes = writes.clone();
     let search_call_tool = call_tool_name.clone();
     let search_tools = ToolBuilder::new("search_tools")
         .description(format!(
@@ -527,12 +568,13 @@ pub fn build_discovery_tools_with_schemas(
         .handler(move |input: SearchInput| {
             let idx = Arc::clone(&index_for_search);
             let sep = search_separator.clone();
+            let writes = search_writes.clone();
             async move {
                 let registry = idx.read().await;
                 let results = registry.query(&input.query, input.top_k);
                 let entries: Vec<SearchResultEntry> = results
                     .into_iter()
-                    .map(|r| SearchResultEntry::from_query(r, &sep))
+                    .map(|r| SearchResultEntry::from_query(r, &sep, writes.as_ref()))
                     .collect();
                 Ok(CallToolResult::text(
                     serde_json::to_string_pretty(&entries).unwrap(),
@@ -542,6 +584,8 @@ pub fn build_discovery_tools_with_schemas(
         .build();
 
     let schemas_for_get = schemas.clone();
+    let get_separator = separator.clone();
+    let get_writes = writes.clone();
     let get_tool = ToolBuilder::new("get_tool")
         .description(format!(
             "Get the full input JSON Schema and description for a tool by its id \
@@ -551,12 +595,15 @@ pub fn build_discovery_tools_with_schemas(
         ))
         .handler(move |input: GetToolInput| {
             let store = schemas_for_get.clone();
+            let separator = get_separator.clone();
+            let writes = get_writes.clone();
             async move {
                 match store.get(&input.tool_id).await {
                     Some(tool) => {
                         let out = serde_json::json!({
                             "id": input.tool_id,
                             "call_name": tool.name,
+                            "call_with": call_wrapper(&tool.name, &separator, writes.as_ref()),
                             "name": tool.name,
                             "description": tool.description,
                             "input_schema": tool.input_schema,
@@ -576,6 +623,7 @@ pub fn build_discovery_tools_with_schemas(
 
     let index_for_similar = Arc::clone(&index);
     let similar_separator = separator.clone();
+    let similar_writes = writes.clone();
     let similar_tools = ToolBuilder::new("similar_tools")
         .description(
             "Find tools similar to a given tool. Uses BM25 similarity based on \
@@ -584,12 +632,13 @@ pub fn build_discovery_tools_with_schemas(
         .handler(move |input: SimilarInput| {
             let idx = Arc::clone(&index_for_similar);
             let sep = similar_separator.clone();
+            let writes = similar_writes.clone();
             async move {
                 let registry = idx.read().await;
                 let results = registry.similar(&input.tool_id, input.top_k);
                 let entries: Vec<SearchResultEntry> = results
                     .into_iter()
-                    .map(|r| SearchResultEntry::from_query(r, &sep))
+                    .map(|r| SearchResultEntry::from_query(r, &sep, writes.as_ref()))
                     .collect();
                 Ok(CallToolResult::text(
                     serde_json::to_string_pretty(&entries).unwrap(),

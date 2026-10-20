@@ -63,16 +63,21 @@ async fn second_backend(calls: Arc<Mutex<Vec<String>>>) -> Server {
 
 impl Fixture {
     async fn new() -> Self {
-        Self::build(false).await
+        Self::build(false, false).await
     }
 
     /// Hub mode: `security.default_deny`, two allowlisted gateways, and one
     /// configured gateway that is down at startup.
     async fn hub() -> Self {
-        Self::build(true).await
+        Self::build(true, false).await
     }
 
-    async fn build(hub: bool) -> Self {
+    /// Hub mode with `security.allow_writes` and `write_note` as a write target.
+    async fn hub_with_writes() -> Self {
+        Self::build(true, true).await
+    }
+
+    async fn build(hub: bool, writes: bool) -> Self {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let headers = Arc::new(Mutex::new(Vec::new()));
         let mut backend = McpRouter::new();
@@ -141,7 +146,16 @@ read_only_targets = ["read_note"]
                 )
             })
             .unwrap_or_default();
-        let security = if hub { "default_deny = true\n" } else { "" };
+        let security = match (hub, writes) {
+            (true, true) => "default_deny = true\nallow_writes = true\n",
+            (true, false) => "default_deny = true\n",
+            _ => "",
+        };
+        let staging_writes = if writes {
+            "write_targets = [\"write_note\"]\n"
+        } else {
+            ""
+        };
         let config = mcp_proxy::ProxyConfig::parse(&format!(
             r#"
 [proxy]
@@ -164,7 +178,7 @@ transport = "http"
 url = "{backend_url}/"
 forward_auth = false
 read_only_targets = ["read_note", "list_notes", "read_typed_note"]
-{hub_config}"#,
+{staging_writes}{hub_config}"#,
             backend_url = backend.url
         ))
         .unwrap();
@@ -623,4 +637,135 @@ fn shipped_hub_configs_fail_closed_without_secrets() {
     .unwrap();
     // Management is off: no static credential is accepted on the public endpoint.
     assert!(deployed.security.admin_token.is_none());
+}
+
+#[tokio::test]
+async fn hub_routes_writes_only_through_the_write_wrapper() {
+    let fixture = Fixture::hub_with_writes().await;
+    let session = Session::new(&fixture.server.url, "downstream-token").await;
+
+    // The write wrapper is public and annotated destructive; call_tool is read-only.
+    let listed = session.list_tools().await;
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    let annotations = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing: {listed}"))["annotations"]
+            .clone()
+    };
+    assert_eq!(
+        annotations("proxy_call_write_tool")["destructiveHint"],
+        true
+    );
+    assert_eq!(annotations("proxy_call_tool")["readOnlyHint"], true);
+
+    // Discovery says which wrapper accepts each tool.
+    let schema = session
+        .call("proxy_get_tool", json!({"tool_id":"staging:write_note"}))
+        .await;
+    success(&schema);
+    let schema: Value = serde_json::from_str(&text_result(&schema)).unwrap();
+    assert_eq!(schema["call_with"], "proxy_call_write_tool");
+    let schema = session
+        .call("proxy_get_tool", json!({"tool_id":"staging:read_note"}))
+        .await;
+    let schema: Value = serde_json::from_str(&text_result(&schema)).unwrap();
+    assert_eq!(schema["call_with"], "proxy_call_tool");
+
+    // Writes need the write wrapper; reads cannot use it.
+    denied(
+        &session
+            .wrapped("_", "staging_write_note", json!({"text":"x"}))
+            .await,
+    );
+    let write_wrapped = |name: &'static str| {
+        session.call(
+            "proxy_call_write_tool",
+            json!({"name": name, "arguments": {"text": "hello"}}),
+        )
+    };
+    denied(&write_wrapped("staging_read_note").await);
+    denied(&write_wrapped("staging_execute").await);
+    denied(&write_wrapped("proxy_add_backend").await);
+    assert!(fixture.calls.lock().unwrap().is_empty());
+
+    success(&write_wrapped("staging_write_note").await);
+    success(
+        &session
+            .call(
+                "proxy_call_write_tool",
+                json!({"name": "staging:write_note", "arguments": {}}),
+            )
+            .await,
+    );
+    assert_eq!(
+        fixture.calls.lock().unwrap().as_slice(),
+        ["write_note", "write_note"]
+    );
+}
+
+#[test]
+fn writes_require_fail_closed_search_mode_and_a_scope_with_oauth() {
+    let base = r#"
+[proxy]
+name = "hub"
+separator = "_"
+tool_exposure = "search"
+[proxy.listen]
+[security]
+default_deny = true
+allow_writes = true
+[auth]
+type = "bearer"
+tokens = ["t"]
+[[backends]]
+name = "notes"
+transport = "http"
+url = "http://127.0.0.1:9/mcp"
+read_only_targets = ["read_note"]
+write_targets = ["append_note"]
+"#;
+    let config = mcp_proxy::ProxyConfig::parse(base).unwrap();
+    assert_eq!(
+        config.write_tool_names(),
+        ["notes_append_note".to_string()].into()
+    );
+
+    let cases = [
+        (
+            "allow_writes requires security.default_deny",
+            base.replace("default_deny = true\n", ""),
+        ),
+        (
+            "write_targets require security.allow_writes",
+            base.replace("allow_writes = true\n", ""),
+        ),
+        (
+            "both a read_only_target and a write_target",
+            base.replace("[\"append_note\"]", "[\"read_note\"]"),
+        ),
+        (
+            "must be an exact name",
+            base.replace("[\"append_note\"]", "[\"append_*\"]"),
+        ),
+        (
+            "requires tool_exposure",
+            base.replace("tool_exposure = \"search\"\n", ""),
+        ),
+        (
+            "requires security.write_scope",
+            base.replace(
+                "[auth]\ntype = \"bearer\"\ntokens = [\"t\"]",
+                "[auth]\ntype = \"oauth\"\nissuer = \"https://auth.example/oauth\"\n\
+                 audience = \"https://hub.example/mcp\"\ntoken_validation = \"introspection\"\n\
+                 introspection_endpoint = \"http://127.0.0.1:9/introspect\"\n\
+                 client_id = \"hub\"\nclient_secret = \"s\"",
+            ),
+        ),
+    ];
+    for (expected, toml) in cases {
+        let error = format!("{:#}", mcp_proxy::ProxyConfig::parse(&toml).unwrap_err());
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
 }
