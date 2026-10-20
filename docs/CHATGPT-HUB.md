@@ -86,21 +86,37 @@ authorization server the existing gateways run. It adds:
 Grants live in memory. Restarting **hub-auth** revokes every token and ChatGPT
 must reconnect; restarting **mcp-proxy** does not.
 
-## Permissions model (V1)
+## Permissions model
 
-- One scope, `hub:lecture`. No write scope exists on the hub.
-- Callable = listed in `read_only_targets` **and** allowed by the gateway
-  itself. Unknown or unclassified tools are refused by default.
-- MCP annotations are not used as proof of safety.
-- No generic shell, execute, delete, or write wrapper may be listed. A tool is
-  only added after reading its implementation or the gateway's own policy.
-- Gateway layer: vault-ro has no write tool; the staging GitHub facade only
-  holds `github:lecture`, so its fail-closed policy refuses all 35 write tools
-  even if the hub were misconfigured.
+Reads and writes are separate, at every layer:
 
-Later phase (not implemented): controlled writes with a separate scope, an
-explicit per-tool allowlist, human confirmation, an audit trail, and
-idempotency keys.
+| | Reads | Writes |
+|---|---|---|
+| Config | `read_only_targets` (exact names) | `write_targets` (exact names), only with `security.allow_writes` |
+| Meta-tool | `proxy_call_tool` (`readOnlyHint`) | `proxy_call_write_tool` (destructive: ChatGPT asks for confirmation) |
+| Scope | `hub:lecture` | `hub:ecriture` (`security.write_scope`), checked on the real target |
+| Direct `tools/call` | allowed | refused: only via `proxy_call_write_tool` (server-side marker) |
+| Gateway | its own read scope | its own write scope; its fail-closed policy still applies |
+
+- Unknown or unclassified tools are refused by default; annotations are never
+  used as proof of safety. Search, `get_tool`, and `list_tools` return
+  `call_with`, the meta-tool that accepts each tool.
+- Which tools are reads is decided by each gateway's own policy (its
+  `tools/list` with the read scope). Browser tools are all writes: reading a
+  page can exfiltrate data and pages can carry prompt injection.
+- Every write logs the real target and argument names (never values) under
+  `mcp_proxy::write_audit`. Writes are not retried; a timeout means "unknown,
+  check before retrying".
+- Kill switch: drop `HUB_AUTH_ALLOW_WRITES=1` and restart hub-auth, or set
+  `allow_writes = false` and restart the hub. Without the scope every write is
+  refused while reads keep working.
+- ChatGPT's confirmation is a convenience, not a security boundary (it can be
+  set to "always allow"); the boundary is the write allowlist plus the scope.
+
+Not behind the hub: sandbox (its binary also hosts the broker and the runner
+listener, so it cannot be cloned; needs a second static token in
+sandbox-gateway-rs), Vault writes (vault-mcp-rs reads its token from a
+hard-coded file; needs a patch), VM and Chat On Steroids (not hosted here).
 
 ## OAuth and consent, what to expect
 

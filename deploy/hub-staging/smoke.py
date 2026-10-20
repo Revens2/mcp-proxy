@@ -177,7 +177,7 @@ def main():
     def refusal(result):
         return json.dumps(result.get("error", {})) + text(result)
 
-    for target in ("github_delete_file", "github_merge_pull_request", "tasks_create"):
+    for target in ("github_delete_file", "github_merge_pull_request", "tasks_tasks_create"):
         check(f"write refused via proxy_call_tool: {target}",
               "changes state" in refusal(s.wrapped(target, {})))
         check(f"write refused as direct call: {target}",
@@ -190,7 +190,7 @@ def main():
                                                {"name": "github_get_me", "arguments": {}})))
     # A write with missing arguments: the hub lets it through (route + scope OK)
     # and the gateway rejects it, so nothing is created.
-    probe = s.tool("proxy_call_write_tool", {"name": "tasks_create", "arguments": {}})
+    probe = s.tool("proxy_call_write_tool", {"name": "tasks_tasks_create", "arguments": {}})
     check("write reaches the gateway through proxy_call_write_tool",
           not any(m in refusal(probe) for m in hub_refusals), refusal(probe)[:200])
 
