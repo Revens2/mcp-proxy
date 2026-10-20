@@ -657,10 +657,10 @@ async fn hub_routes_writes_only_through_the_write_wrapper() {
             .unwrap_or_else(|| panic!("{name} missing: {listed}"))["annotations"]
             .clone()
     };
-    assert_eq!(
-        annotations("proxy_call_write_tool")["destructiveHint"],
-        true
-    );
+    // destructiveHint defaults to true in MCP, so it may be omitted.
+    let write_annotations = annotations("proxy_call_write_tool");
+    assert_ne!(write_annotations["readOnlyHint"], true);
+    assert_ne!(write_annotations["destructiveHint"], false);
     assert_eq!(annotations("proxy_call_tool")["readOnlyHint"], true);
 
     // Discovery says which wrapper accepts each tool.
