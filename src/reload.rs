@@ -161,6 +161,19 @@ pub(crate) fn spawn_config_watcher_with_policy(
     }
 }
 
+fn file_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    #[cfg(unix)]
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.ino()
+    };
+    #[cfg(not(unix))]
+    let inode = 0_u64;
+    Some((modified, inode, metadata.len()))
+}
+
 async fn watch_loop(
     config_path: PathBuf,
     proxy: McpProxy,
@@ -211,7 +224,13 @@ async fn watch_loop(
     tracing::info!(path = %config_path.display(), "Hot reload watching config file");
 
     // Waiting yields this runtime to HTTP, WebSocket and stdio client drivers.
+    let mut last_stamp = None;
     while rx.recv().await.is_some() {
+        let stamp = file_stamp(&config_path);
+        if stamp.is_some() && stamp == last_stamp {
+            continue;
+        }
+        last_stamp = stamp;
         tracing::info!("Config file changed, reloading backends");
 
         let new_config = match load_runtime_config(&config_path) {
@@ -436,6 +455,21 @@ mod tests {
             second.env.insert(key.into(), "value".into());
         }
         assert_eq!(config_fingerprint(&first), config_fingerprint(&second));
+    }
+
+    #[test]
+    fn file_stamp_ignores_reads_and_detects_writes() {
+        let dir = std::env::temp_dir().join(format!("mcp-proxy-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "a = 1\n").unwrap();
+        let first = file_stamp(&path);
+        assert!(first.is_some());
+        let _ = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(file_stamp(&path), first);
+        std::fs::write(&path, "a = 22\n").unwrap();
+        assert_ne!(file_stamp(&path), first);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -360,6 +360,7 @@ fn default_similar_k() -> usize {
 #[derive(Serialize)]
 struct SearchResultEntry {
     id: String,
+    call_name: String,
     server: String,
     name: String,
     description: Option<String>,
@@ -368,10 +369,15 @@ struct SearchResultEntry {
     category: Option<String>,
 }
 
-impl From<ToolQueryResult> for SearchResultEntry {
-    fn from(r: ToolQueryResult) -> Self {
+impl SearchResultEntry {
+    fn from_query(r: ToolQueryResult, separator: &str) -> Self {
+        let call_name = match r.id.split_once(':') {
+            Some((namespace, _)) if namespace != "default" => r.id.replace(':', separator),
+            _ => r.tool.name.clone(),
+        };
         Self {
             id: r.id,
+            call_name,
             server: r.server,
             name: r.tool.name,
             description: r.tool.description,
@@ -494,8 +500,8 @@ fn discovery_id(tool: &ToolDefinition, separator: &str) -> String {
 }
 
 /// Build the three search and category tools without schema retrieval.
-pub fn build_discovery_tools(index: SharedDiscoveryIndex) -> Vec<tower_mcp::Tool> {
-    let mut tools = build_discovery_tools_with_schemas(index, SchemaStore::new());
+pub fn build_discovery_tools(index: SharedDiscoveryIndex, separator: &str) -> Vec<tower_mcp::Tool> {
+    let mut tools = build_discovery_tools_with_schemas(index, SchemaStore::new(), separator);
     tools.retain(|tool| tool.name != "get_tool");
     tools
 }
@@ -504,20 +510,30 @@ pub fn build_discovery_tools(index: SharedDiscoveryIndex) -> Vec<tower_mcp::Tool
 pub fn build_discovery_tools_with_schemas(
     index: SharedDiscoveryIndex,
     schemas: SchemaStore,
+    separator: &str,
 ) -> Vec<tower_mcp::Tool> {
+    let separator = separator.to_string();
+    let call_tool_name = format!("proxy{separator}call_tool");
     let index_for_search = Arc::clone(&index);
+    let search_separator = separator.clone();
+    let search_call_tool = call_tool_name.clone();
     let search_tools = ToolBuilder::new("search_tools")
-        .description(
+        .description(format!(
             "Search for tools across all backends using BM25 full-text search. \
-             Searches tool names, descriptions, parameters, and tags.",
-        )
+             Searches tool names, descriptions, parameters, and tags. Each result \
+             includes \"call_name\": pass it as \"name\" to {search_call_tool} to \
+             invoke that tool (do not use the \"id\" field there)."
+        ))
         .handler(move |input: SearchInput| {
             let idx = Arc::clone(&index_for_search);
+            let sep = search_separator.clone();
             async move {
                 let registry = idx.read().await;
                 let results = registry.query(&input.query, input.top_k);
-                let entries: Vec<SearchResultEntry> =
-                    results.into_iter().map(SearchResultEntry::from).collect();
+                let entries: Vec<SearchResultEntry> = results
+                    .into_iter()
+                    .map(|r| SearchResultEntry::from_query(r, &sep))
+                    .collect();
                 Ok(CallToolResult::text(
                     serde_json::to_string_pretty(&entries).unwrap(),
                 ))
@@ -527,11 +543,12 @@ pub fn build_discovery_tools_with_schemas(
 
     let schemas_for_get = schemas.clone();
     let get_tool = ToolBuilder::new("get_tool")
-        .description(
+        .description(format!(
             "Get the full input JSON Schema and description for a tool by its id \
              (e.g. \"signoz:signoz_query_metrics\"). Call this after search_tools \
-             before invoking an unfamiliar tool through proxy/call_tool.",
-        )
+             before invoking an unfamiliar tool through {call_tool_name} using its \
+             \"call_name\"."
+        ))
         .handler(move |input: GetToolInput| {
             let store = schemas_for_get.clone();
             async move {
@@ -539,6 +556,7 @@ pub fn build_discovery_tools_with_schemas(
                     Some(tool) => {
                         let out = serde_json::json!({
                             "id": input.tool_id,
+                            "call_name": tool.name,
                             "name": tool.name,
                             "description": tool.description,
                             "input_schema": tool.input_schema,
@@ -557,6 +575,7 @@ pub fn build_discovery_tools_with_schemas(
         .build();
 
     let index_for_similar = Arc::clone(&index);
+    let similar_separator = separator.clone();
     let similar_tools = ToolBuilder::new("similar_tools")
         .description(
             "Find tools similar to a given tool. Uses BM25 similarity based on \
@@ -564,11 +583,14 @@ pub fn build_discovery_tools_with_schemas(
         )
         .handler(move |input: SimilarInput| {
             let idx = Arc::clone(&index_for_similar);
+            let sep = similar_separator.clone();
             async move {
                 let registry = idx.read().await;
                 let results = registry.similar(&input.tool_id, input.top_k);
-                let entries: Vec<SearchResultEntry> =
-                    results.into_iter().map(SearchResultEntry::from).collect();
+                let entries: Vec<SearchResultEntry> = results
+                    .into_iter()
+                    .map(|r| SearchResultEntry::from_query(r, &sep))
+                    .collect();
                 Ok(CallToolResult::text(
                     serde_json::to_string_pretty(&entries).unwrap(),
                 ))
@@ -810,7 +832,7 @@ mod tests {
     #[test]
     fn build_discovery_tools_returns_three_tools() {
         let index = Arc::new(RwLock::new(DiscoveryRegistry::new()));
-        let tools = build_discovery_tools(index);
+        let tools = build_discovery_tools(index, "/");
         assert_eq!(tools.len(), 3);
         assert_eq!(tools[0].name, "search_tools");
         assert_eq!(tools[1].name, "similar_tools");

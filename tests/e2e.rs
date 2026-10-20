@@ -1758,7 +1758,7 @@ mod tool_discovery {
 
         // Build the discovery index
         let index = mcp_proxy::discovery::build_index(&mut proxy, "/").await;
-        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index);
+        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index, "/");
 
         // Register discovery tools as a backend
         let router = tower_mcp::McpRouter::new().server_info("discovery", "1.0.0");
@@ -1798,7 +1798,7 @@ mod tool_discovery {
         let mut proxy = build_proxy().await;
 
         let index = mcp_proxy::discovery::build_index(&mut proxy, "/").await;
-        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index);
+        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index, "/");
 
         let router = tower_mcp::McpRouter::new().server_info("discovery", "1.0.0");
         let mut router = router;
@@ -1836,7 +1836,7 @@ mod tool_discovery {
         let mut proxy = build_proxy().await;
 
         let index = mcp_proxy::discovery::build_index(&mut proxy, "/").await;
-        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index);
+        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index, "/");
 
         let router = tower_mcp::McpRouter::new().server_info("discovery", "1.0.0");
         let mut router = router;
@@ -1901,7 +1901,7 @@ mod search_mode {
 
         // Build discovery index and register proxy/ namespace tools
         let index = mcp_proxy::discovery::build_index(&mut proxy, "/").await;
-        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index);
+        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index, "/");
 
         let mut router = tower_mcp::McpRouter::new().server_info("proxy-admin", "1.0.0");
         for tool in discovery_tools {
@@ -1979,7 +1979,7 @@ mod search_mode {
 
         // Build discovery index (indexes math/add, text/echo, etc.)
         let index = mcp_proxy::discovery::build_index(&mut proxy, "/").await;
-        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index);
+        let discovery_tools = mcp_proxy::discovery::build_discovery_tools(index, "/");
 
         let mut router = tower_mcp::McpRouter::new().server_info("proxy-admin", "1.0.0");
         for tool in discovery_tools {

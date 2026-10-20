@@ -66,7 +66,7 @@ async fn get_tool_retains_nested_schema_and_uses_search_result_ids() {
     let id = &results[0].id;
     assert_eq!(id, "api:query/nested");
     let mut router = McpRouter::new();
-    for tool in build_discovery_tools_with_schemas(index, schemas) {
+    for tool in build_discovery_tools_with_schemas(index, schemas, "/") {
         router = router.tool(tool);
     }
     proxy

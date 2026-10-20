@@ -17,6 +17,7 @@ use tower_mcp_types::JsonRpcError;
 pub(crate) struct SearchInvocation<S> {
     inner: S,
     prefix: String,
+    separator: String,
     wrapper: String,
 }
 
@@ -27,8 +28,22 @@ impl<S> SearchInvocation<S> {
         Self {
             inner,
             prefix,
+            separator: separator.to_string(),
             wrapper,
         }
+    }
+}
+
+fn normalize_target_name(name: &str, separator: &str) -> String {
+    let trimmed = name.trim();
+    if separator.is_empty() {
+        return trimmed.to_owned();
+    }
+    match trimmed.find(':') {
+        Some(colon) if trimmed.find(separator).is_none_or(|sep| colon < sep) => {
+            trimmed.replace(':', separator)
+        }
+        _ => trimmed.to_owned(),
     }
 }
 
@@ -53,10 +68,8 @@ where
                 params.arguments.clone(),
             );
             let input = match input {
-                Ok(input) if !input.name.is_empty() && !input.name.starts_with(&self.prefix) => {
-                    input
-                }
-                _ => {
+                Ok(input) => input,
+                Err(_) => {
                     return Box::pin(async move {
                         Ok(RouterResponse {
                             id: req.id,
@@ -67,7 +80,20 @@ where
                     });
                 }
             };
-            params.name = input.name;
+            let target = normalize_target_name(&input.name, &self.separator);
+            if target.is_empty() || target.starts_with(&self.prefix) {
+                let message = format!(
+                    "{} requires an ordinary target name and object arguments",
+                    self.wrapper
+                );
+                return Box::pin(async move {
+                    Ok(RouterResponse {
+                        id: req.id,
+                        inner: Err(JsonRpcError::invalid_params(message)),
+                    })
+                });
+            }
+            params.name = target;
             params.arguments = input.arguments.unwrap_or_default().into();
         }
         Box::pin(self.inner.call(req))
@@ -158,6 +184,46 @@ mod tests {
                 .await
                 .unwrap();
             assert!(result.inner.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn resolves_discovery_ids_to_public_names() {
+        for (separator, requested, expected) in [
+            ("/", "api:echo", "api/echo"),
+            ("::", "api:echo", "api::echo"),
+            ("/", "api/echo", "api/echo"),
+            ("::", "api::echo", "api::echo"),
+            ("_", "api:read_note", "api_read_note"),
+            ("_", "api_read_note", "api_read_note"),
+        ] {
+            let expected = expected.to_string();
+            let inner = tower::service_fn(move |req: RouterRequest| {
+                let expected = expected.clone();
+                async move {
+                    let McpRequest::CallTool(params) = req.inner else {
+                        panic!("expected call")
+                    };
+                    assert_eq!(params.name, expected);
+                    Ok::<_, Infallible>(RouterResponse {
+                        id: req.id,
+                        inner: Ok(McpResponse::CallTool(tower_mcp::CallToolResult::text("ok"))),
+                    })
+                }
+            });
+            let params = serde_json::from_value(json!({
+                "name": format!("proxy{separator}call_tool"),
+                "arguments": {"name": requested, "arguments": {}},
+            }))
+            .unwrap();
+            SearchInvocation::new(inner, separator)
+                .oneshot(RouterRequest {
+                    id: RequestId::Number(1),
+                    inner: McpRequest::CallTool(params),
+                    extensions: Extensions::new(),
+                })
+                .await
+                .unwrap();
         }
     }
 }

@@ -167,6 +167,7 @@ impl Proxy {
             let mut tools = crate::discovery::build_discovery_tools_with_schemas(
                 index.clone(),
                 schemas.clone(),
+                &config.proxy.separator,
             );
             // Fail-closed gateways give ordinary callers the full (filtered) inventory.
             if config.security.default_deny {
