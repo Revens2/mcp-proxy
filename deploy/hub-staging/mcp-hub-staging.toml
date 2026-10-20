@@ -381,3 +381,18 @@ max_concurrent = 4
 [observability]
 audit = true
 json_logs = true
+
+# --- finbank: Credit Mutuel read-only (AIS) via Enable Banking, stdio bridge.
+# Added on the VPS by the finbank project; kept here so redeploys keep it.
+[[backends]]
+name = "finbank"
+transport = "stdio"
+command = "/usr/bin/python3"
+args = ["/opt/finbank/deploy/hub-bridge.py"]
+forward_auth = false
+read_only_targets = ["accounts_list", "balances_get", "transactions_list", "summary_get", "status_get"]
+write_targets = []
+[backends.timeout]
+seconds = 15
+[backends.concurrency]
+max_concurrent = 4
