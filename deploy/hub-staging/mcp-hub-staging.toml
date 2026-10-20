@@ -20,9 +20,11 @@ version = "0.6.0"
 separator = "_"
 tool_exposure = "search"
 tool_discovery = true
-# Connection fields (url, timeouts) reload live; policy changes require restart.
-hot_reload = true
-instructions = """Read-only MCP hub. Find tools with proxy_search_tools, read the \
+# Changes are applied by restart (`systemctl restart mcp-hub-staging`); the
+# file watcher is off on this host (it retriggered on its own reads).
+hot_reload = false
+instructions = """Read-only MCP hub for vault, github, tasks, calendar, and orch. Find \
+tools with proxy_search_tools (or proxy_list_tools for the full inventory), read the \
 input schema with proxy_get_tool, then call proxy_call_tool with the tool name and \
 arguments. proxy_backend_status reports which gateways are reachable. Only listed \
 read-only tools are callable; anything else is refused."""
@@ -115,6 +117,91 @@ read_only_targets = [
 
 [backends.timeout]
 seconds = 30
+
+[backends.concurrency]
+max_concurrent = 4
+
+# --- Gateways 3-5: read-only staging instances of the Rust facades ---------
+# Created by deploy/hub-staging/facade-hub-staging.sh: same binary and
+# fail-closed policy as production, one static token with the read scope
+# only. Each list below is exactly what the facade's own policy classifies as
+# read for that scope (tools/list with the read token).
+
+[[backends]]
+name = "tasks"
+transport = "http"
+url = "http://127.0.0.1:18986/mcp"
+bearer_token = "${MCP_HUB_TASKS_TOKEN}"
+forward_auth = false
+read_only_targets = [
+    "tasks_list",
+    "tasks_get",
+    "tasks_search",
+    "tasks_inbox",
+    "tasks_today",
+    "tasks_overdue",
+    "tasks_upcoming",
+    "tasks_unscheduled",
+    "tasks_recently_changed",
+    "tasks_history",
+]
+
+[backends.timeout]
+seconds = 30
+
+[backends.concurrency]
+max_concurrent = 4
+
+[[backends]]
+name = "calendar"
+transport = "http"
+url = "http://127.0.0.1:18982/mcp"
+bearer_token = "${MCP_HUB_CALENDAR_TOKEN}"
+forward_auth = false
+read_only_targets = [
+    "list-calendars",
+    "list-events",
+    "search-events",
+    "get-event",
+    "list-colors",
+    "get-freebusy",
+    "get-current-time",
+]
+
+[backends.timeout]
+seconds = 30
+
+[backends.concurrency]
+max_concurrent = 4
+
+# Orchestrator: observation only (runners, jobs, missions, alerts, questions).
+# Launching or answering agents stays out of the hub.
+[[backends]]
+name = "orch"
+transport = "http"
+url = "http://127.0.0.1:18977/mcp"
+bearer_token = "${MCP_HUB_ORCH_TOKEN}"
+forward_auth = false
+read_only_targets = [
+    "agent_runner_list",
+    "agent_runner_inspect",
+    "agent_workspace_list",
+    "agent_job_list",
+    "agent_job_get",
+    "agent_job_output",
+    "agent_job_events",
+    "agent_job_wait",
+    "agent_mission_get",
+    "agent_mission_wait",
+    "agent_question_list",
+    "agent_question_get",
+    "infra_alert_list",
+    "infra_alert_get",
+]
+
+# The *_wait tools block for up to 60 s.
+[backends.timeout]
+seconds = 75
 
 [backends.concurrency]
 max_concurrent = 4

@@ -135,7 +135,7 @@ fn management_tool(prefix: &str, name: &str) -> bool {
     name.strip_prefix(prefix).is_some_and(|local| {
         !matches!(
             local,
-            "search_tools" | "get_tool" | "call_tool" | "backend_status"
+            "search_tools" | "get_tool" | "call_tool" | "backend_status" | "list_tools"
         )
     })
 }

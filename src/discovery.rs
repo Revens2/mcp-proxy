@@ -407,6 +407,84 @@ impl SchemaStore {
     }
 }
 
+/// Build `list_tools`: the complete inventory of indexed tools, grouped by
+/// backend, with discovery IDs and one-line descriptions.
+///
+/// The schema store only holds tools the capability filter allows when it is
+/// built with a [`crate::filter::ToolVisibility`], so the inventory never
+/// reveals a refused tool. Intended for `security.default_deny` gateways.
+pub fn build_inventory_tool(schemas: SchemaStore) -> tower_mcp::Tool {
+    ToolBuilder::new("list_tools")
+        .description(
+            "List every callable tool, grouped by backend, with its tool_id and a short \
+             description. Use proxy/get_tool for the input schema, then proxy/call_tool.",
+        )
+        .read_only()
+        .handler(move |_: NoParams| {
+            let schemas = schemas.clone();
+            async move {
+                let store = schemas.0.read().await;
+                let mut by_backend: std::collections::BTreeMap<&str, Vec<InventoryEntry>> =
+                    std::collections::BTreeMap::new();
+                for (id, tool) in store.iter() {
+                    let backend = id.split_once(':').map_or("default", |(ns, _)| ns);
+                    let description = tool
+                        .description
+                        .as_deref()
+                        .and_then(|d| d.lines().next())
+                        .unwrap_or("")
+                        .chars()
+                        .take(160)
+                        .collect();
+                    by_backend.entry(backend).or_default().push(InventoryEntry {
+                        tool_id: id.clone(),
+                        name: tool.name.clone(),
+                        description,
+                    });
+                }
+                let backends: Vec<InventoryBackend> = by_backend
+                    .into_iter()
+                    .map(|(backend, mut tools)| {
+                        tools.sort_by(|a, b| a.tool_id.cmp(&b.tool_id));
+                        InventoryBackend {
+                            backend: backend.to_string(),
+                            tool_count: tools.len(),
+                            tools,
+                        }
+                    })
+                    .collect();
+                let result = InventoryResult {
+                    total_tools: backends.iter().map(|b| b.tool_count).sum(),
+                    backends,
+                };
+                Ok(CallToolResult::text(
+                    serde_json::to_string_pretty(&result).unwrap(),
+                ))
+            }
+        })
+        .build()
+}
+
+#[derive(Serialize)]
+struct InventoryEntry {
+    tool_id: String,
+    name: String,
+    description: String,
+}
+
+#[derive(Serialize)]
+struct InventoryBackend {
+    backend: String,
+    tool_count: usize,
+    tools: Vec<InventoryEntry>,
+}
+
+#[derive(Serialize)]
+struct InventoryResult {
+    total_tools: usize,
+    backends: Vec<InventoryBackend>,
+}
+
 fn discovery_id(tool: &ToolDefinition, separator: &str) -> String {
     let (namespace, local) = tool
         .name

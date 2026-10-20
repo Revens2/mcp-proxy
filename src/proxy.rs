@@ -164,10 +164,14 @@ impl Proxy {
                 discovery_visibility.as_ref(),
             )
             .await;
-            let tools = crate::discovery::build_discovery_tools_with_schemas(
+            let mut tools = crate::discovery::build_discovery_tools_with_schemas(
                 index.clone(),
                 schemas.clone(),
             );
+            // Fail-closed gateways give ordinary callers the full (filtered) inventory.
+            if config.security.default_deny {
+                tools.push(crate::discovery::build_inventory_tool(schemas.clone()));
+            }
             (Some(index), Some(schemas), Some(tools))
         } else {
             (None, None, None)

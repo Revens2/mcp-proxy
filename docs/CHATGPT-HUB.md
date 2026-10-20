@@ -34,8 +34,10 @@ nginx  mymcps.duckdns.org
 Rules:
 
 - **One public surface.** In `tool_exposure = "search"` ChatGPT sees only
-  `proxy_search_tools`, `proxy_get_tool`, `proxy_call_tool`, and
-  `proxy_backend_status`. Backend tools never appear in `tools/list`, so
+  `proxy_search_tools`, `proxy_list_tools` (full inventory: tool_id and
+  one-line description of every allowed tool), `proxy_get_tool`,
+  `proxy_call_tool`, and `proxy_backend_status`. Backend tools never appear in
+  `tools/list`, so
   hundreds of tools do not enter the model context.
 - **The hub is a router, not a bypass.** It reaches gateways only through
   their normal MCP endpoint with its own credential; each gateway keeps
@@ -174,6 +176,17 @@ others and `proxy_backend_status` reports `degraded`. Each backend has its own
 timeout and concurrency cap; a slow gateway does not block the others.
 Gateways skipped at startup are not retried until the hub restarts.
 
+The proxy does not reconnect an HTTP backend whose transport dropped (for
+example vault-ro's nightly restart). `mcp-hub-staging-watchdog.timer` checks
+every 2 minutes for `Transport send error` / `SSE connection failed` logged
+since the hub's last start and restarts the hub once; ChatGPT keeps its grant
+because tokens live in hub-auth. A native reconnect in the engine is the
+proper fix and remains to do.
+
+The file watcher (`hot_reload`) is off in the staging config: on this host it
+retriggered on its own reads (one reload every ~2 s). Changes are applied with
+`systemctl restart mcp-hub-staging`.
+
 ## Staging deployment (VPS Étude)
 
 Files: `deploy/hub-staging/`.
@@ -183,8 +196,9 @@ Files: `deploy/hub-staging/`.
 | Service user | `mcp-hub` (system, no shell) |
 | Binaries, config | `/opt/mcp-hub-staging/{mcp-proxy,hub-auth,mcp-hub-staging.toml}` |
 | Secrets | `/etc/mcp-hub-staging/{hub.env,consent.hash,introspection.secret}` (0600 `mcp-hub`), `github-facade.token` (0400 `github-app`) |
-| Units | `hub-auth-staging`, `mcp-hub-staging`, `github-gateway-hub-staging` |
-| Ports (loopback) | 18983 hub-auth, 18984 hub, 18985 GitHub facade |
+| Units | `hub-auth-staging`, `mcp-hub-staging`, `mcp-hub-staging-watchdog.timer`, `{github,tasks,calendar,orch}-gateway-hub-staging` |
+| Ports (loopback) | 18983 hub-auth, 18984 hub, 18985 GitHub, 18986 tasks, 18982 calendar, 18977 orch |
+| Read-only facades | `facade-hub-staging.sh <name> <prod-unit> <env-prefix> <port> <read-scope>` clones a production mcp-framework-rs facade with only its read scope |
 | nginx | `snippets/hub-staging-mcp.conf` included in the mymcps vhost |
 
 Install (aarch64, built on the VPS with low priority):

@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart the MCP hub staging after a lost backend transport
+After=mcp-hub-staging.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/mcp-hub-staging/mcp-hub-staging-watchdog.sh

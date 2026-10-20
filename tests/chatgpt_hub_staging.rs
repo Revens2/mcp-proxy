@@ -419,9 +419,33 @@ async fn hub_discovers_multiple_gateways_and_fails_closed() {
             "proxy_backend_status",
             "proxy_call_tool",
             "proxy_get_tool",
+            "proxy_list_tools",
             "proxy_search_tools"
         ]
     );
+
+    // The inventory lists every allowed tool of every live gateway, and only those.
+    let inventory = session.call("proxy_list_tools", json!({})).await;
+    success(&inventory);
+    let inventory: Value = serde_json::from_str(&text_result(&inventory)).unwrap();
+    let mut listed: Vec<String> = inventory["backends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["tools"].as_array().unwrap().iter())
+        .map(|t| t["tool_id"].as_str().unwrap().to_string())
+        .collect();
+    listed.sort_unstable();
+    assert_eq!(
+        listed,
+        [
+            "repo:get_file_contents",
+            "staging:list_notes",
+            "staging:read_note",
+            "staging:read_typed_note"
+        ]
+    );
+    assert_eq!(inventory["total_tools"], 4);
 
     // Discovery spans both live gateways; denied tools stay invisible.
     let found = session

@@ -150,7 +150,7 @@ def main():
 
     names = sorted(t["name"] for t in s.rpc("tools/list", {})["result"]["tools"])
     check("public surface is meta-tools only",
-          names == ["proxy_backend_status", "proxy_call_tool", "proxy_get_tool", "proxy_search_tools"],
+          names == ["proxy_backend_status", "proxy_call_tool", "proxy_get_tool", "proxy_list_tools", "proxy_search_tools"],
           str(names))
 
     ids = [r["id"] for r in json.loads(text(s.tool("proxy_search_tools", {"query": "search vault notes"})))]
@@ -170,6 +170,16 @@ def main():
                    "vault_append_note", "unknown_tool", "proxy_add_backend"):
         check(f"refused via call_tool: {target}", not ok(s.wrapped(target, {})))
         check(f"refused direct: {target}", not ok(s.tool(target, {})))
+
+    inventory = json.loads(text(s.tool("proxy_list_tools", {})))
+    backends = sorted(b["backend"] for b in inventory["backends"])
+    ids = [t["tool_id"] for b in inventory["backends"] for t in b["tools"]]
+    check("inventory covers every gateway",
+          backends == ["calendar", "github", "orch", "tasks", "vault"], str(backends))
+    check("inventory hides write tools",
+          not any(i.split(":", 1)[1] in ("delete_file", "push_files", "append_note", "tasks_create")
+                  for i in ids), str(len(ids)))
+    print(f"      inventory: {inventory['total_tools']} tools")
 
     status = s.tool("proxy_backend_status", {})
     body = text(status)
